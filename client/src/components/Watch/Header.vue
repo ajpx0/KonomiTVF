@@ -1,6 +1,7 @@
 <template>
     <header class="watch-header" :class="{'watch-header--video': playback_mode === 'Video'}">
-        <router-link class="watch-header__back-icon" v-ripple :to="playback_mode === 'Live' ? '/tv/' : '/videos/'">
+        <router-link class="watch-header__back-icon" v-ripple :to="playback_mode === 'Live' ? '/tv/' : '/videos/'"
+            @click="exitNativeFullscreen">
             <Icon icon="fluent:chevron-left-12-filled" width="21px" />
         </router-link>
         <img class="watch-header__broadcaster" v-if="playback_mode === 'Live'"
@@ -65,6 +66,13 @@ export default defineComponent({
         },
     },
     methods: {
+        exitNativeFullscreen() {
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            } else if (document.webkitFullscreenElement) {
+                document.webkitExitFullscreen?.();
+            }
+        },
         formatTime(time_obj: Dayjs): string {
             const is_sp_h = Utils.isSmartphoneHorizontal();
             const formatted = time_obj.format(is_sp_h ? 'HH:mm:ss' : 'YYYY/MM/DD HH:mm:ss');

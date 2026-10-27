@@ -64,6 +64,7 @@ jobs:
       - name: Create Release Commit
         id: create_release_commit
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.get_version.outputs.version }}
         run: |
           git config user.name 'github-actions[bot]'
@@ -102,8 +103,16 @@ jobs:
           git add -A
           git add -f client/dist/
           git commit -m "v${VERSION}"
-          git push origin main
-          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          TEMP_REF="release-commit-${GITHUB_RUN_ID}"
+          git push origin "HEAD:refs/heads/${TEMP_REF}"
+          SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits" \
+            -f message="v${VERSION}" \
+            -f tree="$(git rev-parse 'HEAD^{tree}')" \
+            -f "parents[]=$(git rev-parse HEAD^)" \
+            --jq .sha)"
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${TEMP_REF}"
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/main" -f sha="${SHA}"
+          echo "sha=${SHA}" >> $GITHUB_OUTPUT
 
   publish_release:
     needs: create_release_commit

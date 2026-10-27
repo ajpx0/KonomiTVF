@@ -241,9 +241,6 @@ export default defineComponent({
             }
         }
     }
-    .watch-header__back-icon {
-        display: none !important;
-    }
 }
 
 // フルスクリーン時 + コントロール表示時
