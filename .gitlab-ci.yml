@@ -1,0 +1,430 @@
+stages:
+  - prepare
+  - build
+  - release
+  - docker
+
+variables:
+  CI_TASK:
+    value: ""
+    options: ["", "release-commit", "publish-release", "build-installer", "build-thirdparty", "docker"]
+    description: 手動実行するタスク
+  RELEASE_VERSION:
+    value: ""
+    description: release-commit / publish-release のバージョン (空欄なら JST の日付 YYYY.M.D、v はつけない)
+  RELEASE_REF:
+    value: main
+    description: publish-release でリリースするコミット (コミットハッシュまたはブランチ名)
+  PYTHON_TAG: '20260901'
+  PYTHON_MAJOR_VERSION: '3.13'
+  PYTHON_VERSION: '3.13.15'
+  UV_VERSION: '0.12.18'
+  FFMPEG_TAG: 'autobuild-2026-08-31-13-27'
+  FFMPEG_MAJOR_VERSION: '9.0'
+  FFMPEG_VERSION: '9.0.1-11-ge47273f4d9'
+  QSVENCC_VERSION: '8.34'
+  NVENCC_VERSION: '9.38'
+  VCEENCC_VERSION: '9.21'
+  RKMPPENC_VERSION: '0.19'
+  INTEL_GMMLIB_TAG: 'intel-gmmlib-22.7.2'
+  INTEL_LIBVA_TAG: '2.22.0'
+  INTEL_MEDIA_DRIVER_TAG: 'intel-media-25.2.4'
+  INTEL_MEDIASDK_TAG: 'intel-mediasdk-23.2.2'
+  INTEL_ONEVPL_GPU_TAG: 'intel-onevpl-25.4.6'
+  GOLANG_VERSION: '1.23.8'
+  TSREADEX_COMMIT_HASH: 'a82528ccb698fcd07b4da1bb2243e63d685c34a7'
+  PSISIARC_COMMIT_HASH: '6593a0f63aedaaecfac7682b51e267874a8ec549'
+  PSISIMUX_COMMIT_HASH: '18c3c020e51e16804340c834835e0cfd72c8b50d'
+  AKEBI_COMMIT_HASH: 'be986980f7a560b4f74eefcfa2cd474f892f3bc7'
+
+.rules-installer:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: $CI_PIPELINE_SOURCE == "web" && $CI_TASK == "build-installer"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"
+      changes:
+        - installer/**/*
+        - .gitlab-ci.yml
+
+.rules-thirdparty:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: $CI_PIPELINE_SOURCE == "web" && $CI_TASK == "build-thirdparty"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"
+      changes:
+        - .github/workflows/scripts/build_intel_media_stack_standalone.sh
+        - .github/workflows/scripts/poetry/**/*
+        - .github/workflows/patches/**/*
+        - .gitlab-ci.yml
+
+.ubuntu2004:
+  image: ubuntu:20.04
+  variables:
+    DEBIAN_FRONTEND: noninteractive
+
+installer-windows:
+  extends: .rules-installer
+  stage: build
+  tags: [saas-windows-medium-amd64]
+  script:
+    - $ProgressPreference = 'SilentlyContinue'
+    - powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/$env:UV_VERSION/install.ps1 | iex"
+    - $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+    - cd installer
+    - uv sync --frozen
+    - uv run --frozen task build
+  artifacts:
+    paths:
+      - installer/dist/KonomiTV-Installer.exe
+
+.installer-linux:
+  extends: [.rules-installer, .ubuntu2004]
+  stage: build
+  script:
+    - apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates curl zlib1g zlib1g-dev binutils
+    - curl -fSL -o python.tar.gz "https://github.com/indygreg/python-build-standalone/releases/download/$PYTHON_TAG/cpython-$PYTHON_VERSION+$PYTHON_TAG-$PYTHON_ARCH_NAME-unknown-linux-gnu-install_only_stripped.tar.gz"
+    - tar xf python.tar.gz && cp -r python/* /usr/local/ && rm -rf python python.tar.gz
+    - python$PYTHON_MAJOR_VERSION -m pip install uv==$UV_VERSION
+    - cd installer
+    - uv sync --frozen --python /usr/local/bin/python$PYTHON_MAJOR_VERSION
+    - uv run --frozen task build
+    - if [ "$ARTIFACT_SUFFIX" != "" ]; then mv dist/KonomiTV-Installer.elf "dist/KonomiTV-Installer$ARTIFACT_SUFFIX.elf"; fi
+  artifacts:
+    paths:
+      - installer/dist/KonomiTV-Installer*.elf
+
+installer-linux-amd64:
+  extends: .installer-linux
+  variables:
+    PYTHON_ARCH_NAME: x86_64_v2
+    ARTIFACT_SUFFIX: ''
+
+installer-linux-arm64:
+  extends: .installer-linux
+  tags: [saas-linux-small-arm64]
+  variables:
+    PYTHON_ARCH_NAME: aarch64
+    ARTIFACT_SUFFIX: '-ARM'
+
+thirdparty-windows:
+  extends: .rules-thirdparty
+  stage: build
+  tags: [saas-windows-medium-amd64]
+  script:
+    - $ProgressPreference = 'SilentlyContinue'
+    - choco install 7zip make -y --no-progress
+    - $env:Path = "C:\Program Files\7-Zip;C:\ProgramData\chocolatey\bin;$env:Path"
+    - $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
+    - Set-Alias msbuild $msbuild
+    - mkdir thirdparty | Out-Null
+    - |
+      foreach ($p in @(@('tsreadex', $env:TSREADEX_COMMIT_HASH), @('psisiarc', $env:PSISIARC_COMMIT_HASH), @('psisimux', $env:PSISIMUX_COMMIT_HASH))) {
+        $name = $p[0]
+        git clone "https://github.com/xtne6f/$name"
+        Push-Location $name
+        git checkout $p[1]
+        msbuild "$name.sln" /t:Build /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        mkdir "../thirdparty/$name" | Out-Null
+        Copy-Item "x64/Release/$name.exe" "../thirdparty/$name/$name.exe"
+        Copy-Item License.txt "../thirdparty/$name/"
+        Pop-Location
+      }
+    - curl.exe -fSL -o go.zip "https://go.dev/dl/go$env:GOLANG_VERSION.windows-amd64.zip"
+    - Expand-Archive go.zip -DestinationPath C:\golang
+    - $env:Path = "C:\golang\go\bin;$env:Path"
+    - go env
+    - git clone https://github.com/tsukumijima/Akebi
+    - cd Akebi
+    - git checkout $env:AKEBI_COMMIT_HASH
+    - make build-https-server
+    - mkdir ../thirdparty/Akebi | Out-Null
+    - Copy-Item akebi-https-server.exe ../thirdparty/Akebi/akebi-https-server.exe
+    - Copy-Item License.txt ../thirdparty/Akebi/
+    - cd ..
+    - $ff = "ffmpeg-n$env:FFMPEG_VERSION-win64-gpl-shared-$env:FFMPEG_MAJOR_VERSION"
+    - curl.exe -fSLO "https://github.com/BtbN/FFmpeg-Builds/releases/download/$env:FFMPEG_TAG/$ff.zip"
+    - 7z x -y "$ff.zip"
+    - mkdir thirdparty/FFmpeg | Out-Null
+    - Copy-Item "$ff/bin/*" thirdparty/FFmpeg/
+    - Copy-Item "$ff/LICENSE.txt" thirdparty/FFmpeg/License.txt
+    - Remove-Item thirdparty/FFmpeg/ffplay.exe
+    - |
+      foreach ($e in @(@('QSVEnc', 'QSVEncC', $env:QSVENCC_VERSION, 'license.txt'), @('NVEnc', 'NVEncC', $env:NVENCC_VERSION, 'NVEnc_license.txt'), @('VCEEnc', 'VCEEncC', $env:VCEENCC_VERSION, 'VCEEnc_license.txt'))) {
+        $repo, $bin, $ver, $lic = $e
+        curl.exe -fSLO "https://github.com/rigaya/$repo/releases/download/$ver/${bin}_${ver}_x64.7z"
+        7z x -y -o"thirdparty/$bin" "${bin}_${ver}_x64.7z"
+        Remove-Item -Force "thirdparty/$bin/hdr10plus_gen.exe" -ErrorAction SilentlyContinue
+        Move-Item "thirdparty/$bin/${bin}64.exe" "thirdparty/$bin/$bin.exe"
+        curl.exe -fSL -o "thirdparty/$bin/License.txt" "https://raw.githubusercontent.com/rigaya/$repo/master/$lic"
+      }
+    - curl.exe -fSL -o python.tar.gz "https://github.com/indygreg/python-build-standalone/releases/download/$env:PYTHON_TAG/cpython-$env:PYTHON_VERSION+$env:PYTHON_TAG-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+    - tar xvf python.tar.gz
+    - Move-Item python thirdparty/Python
+    - Rename-Item thirdparty/Python/LICENSE.txt License.txt
+    - thirdparty/Python/python.exe -m pip install uv==$env:UV_VERSION
+    - Copy-Item -Recurse .github/workflows/scripts/poetry thirdparty/Python/Lib/site-packages/poetry
+    - 7z a -m0=LZMA2 -mx=9 -md=128m -mfb=128 -ms=16g -mmt=on -mf=BCJ thirdparty-windows.7z thirdparty
+  artifacts:
+    paths:
+      - thirdparty-windows.7z
+
+.thirdparty-linux:
+  extends: [.rules-thirdparty, .ubuntu2004]
+  stage: build
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config git curl ca-certificates p7zip-full patchelf xz-utils perl make
+    - curl -fSL -o go.tgz "https://go.dev/dl/go$GOLANG_VERSION.linux-$ARCH.tar.gz" && tar -C /usr/local -xzf go.tgz && rm go.tgz
+    - export PATH="/usr/local/go/bin:$PATH"
+    - mkdir thirdparty
+    - |
+      for name in tsreadex psisiarc psisimux; do
+        hash_var="$(echo "$name" | tr a-z A-Z)_COMMIT_HASH"
+        git clone "https://github.com/xtne6f/$name"
+        (cd "$name" && git checkout "$(eval echo \$$hash_var)" && make)
+        mkdir "thirdparty/$name"
+        cp "$name/$name" "thirdparty/$name/$name.elf"
+        chmod a+x "thirdparty/$name/$name.elf"
+        cp "$name/License.txt" "thirdparty/$name/"
+      done
+    - go env
+    - git clone https://github.com/tsukumijima/Akebi
+    - (cd Akebi && git checkout "$AKEBI_COMMIT_HASH" && CGO_ENABLED=0 GOARCH=$ARCH make build-https-server)
+    - mkdir thirdparty/Akebi
+    - cp Akebi/akebi-https-server thirdparty/Akebi/akebi-https-server.elf
+    - chmod a+x thirdparty/Akebi/akebi-https-server.elf
+    - cp Akebi/License.txt thirdparty/Akebi/
+    - ff="ffmpeg-n$FFMPEG_VERSION-$FFMPEG_PLATFORM-gpl-shared-$FFMPEG_MAJOR_VERSION"
+    - curl -fSLO "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_TAG/$ff.tar.xz"
+    - tar xf "$ff.tar.xz"
+    - mkdir thirdparty/FFmpeg
+    - cp $ff/bin/* thirdparty/FFmpeg/
+    - cp -r $ff/lib/* thirdparty/FFmpeg/
+    - cp $ff/LICENSE.txt thirdparty/FFmpeg/License.txt
+    - rm -rf thirdparty/FFmpeg/pkgconfig
+    - mv thirdparty/FFmpeg/ffmpeg thirdparty/FFmpeg/ffmpeg.elf
+    - mv thirdparty/FFmpeg/ffprobe thirdparty/FFmpeg/ffprobe.elf
+    - rm thirdparty/FFmpeg/ffplay
+    - chmod a+x thirdparty/FFmpeg/ffmpeg.elf thirdparty/FFmpeg/ffprobe.elf
+    - patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' thirdparty/FFmpeg/ffmpeg.elf
+    - patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' thirdparty/FFmpeg/ffprobe.elf
+  artifacts:
+    paths:
+      - thirdparty-linux*.tar.xz
+
+thirdparty-linux-amd64:
+  extends: .thirdparty-linux
+  variables:
+    ARCH: amd64
+    PYTHON_ARCH_NAME: x86_64_v2
+    FFMPEG_PLATFORM: linux64
+    ARTIFACT_SUFFIX: ''
+  cache:
+    key: intel-media-stack-amd64-$INTEL_GMMLIB_TAG-$INTEL_LIBVA_TAG-$INTEL_MEDIA_DRIVER_TAG-$INTEL_MEDIASDK_TAG-$INTEL_ONEVPL_GPU_TAG
+    paths:
+      - intel-media-stack/artifact/
+  script:
+    - mkdir thirdparty/Library
+    - |
+      if [ ! -e intel-media-stack/artifact/Library/dri/iHD_drv_video.so ] || [ ! -e intel-media-stack/artifact/Library/libva.so.2 ] || [ ! -e intel-media-stack/artifact/Library/libmfxhw64.so.1 ] || [ ! -e intel-media-stack/artifact/Library/libmfx-gen.so.1.2 ] || [ ! -e intel-media-stack/artifact/Library/libmfx-gen/enctools.so ]; then
+        HOST_UID=$(id -u) HOST_GID=$(id -g) bash .github/workflows/scripts/build_intel_media_stack_standalone.sh "$CI_PROJECT_DIR/intel-media-stack"
+      else
+        echo 'Intel Media Stack build cache hit. Skip rebuilding Intel Media Stack.'
+      fi
+    - |
+      if [ -d intel-media-stack/artifact/Library/lib ] || [ -d intel-media-stack/artifact/Library/usr ]; then
+        echo 'Unexpected Intel Media Stack artifact layout. Only dri/ and libmfx-gen/ are allowed under Library/.' >&2
+        find intel-media-stack/artifact/Library -maxdepth 2 -type d | sort >&2
+        exit 1
+      fi
+    - mkdir -p thirdparty/Library/dri thirdparty/Library/libmfx-gen
+    - cp -a intel-media-stack/artifact/Library/. thirdparty/Library/
+    - |
+      bash <<'EOF'
+      find thirdparty/Library -maxdepth 1 -name '*.so*' -not -type l -not -type d -print0 | while IFS= read -r -d '' fn; do patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' "$fn"; done
+      find thirdparty/Library/libmfx-gen -name '*.so*' -not -type l -not -type d -print0 | while IFS= read -r -d '' fn; do patchelf --set-rpath '$ORIGIN:$ORIGIN/..' "$fn"; done
+      EOF
+    - patchelf --set-rpath '$ORIGIN:$ORIGIN/..' thirdparty/Library/dri/iHD_drv_video.so
+    - find thirdparty/Library -name '*.so*' -not -type l -not -type d -exec chmod a+x {} +
+    - curl -fSLO "https://github.com/rigaya/QSVEnc/releases/download/$QSVENCC_VERSION/qsvencc_${QSVENCC_VERSION}_amd64.deb"
+    - 7z x -y "qsvencc_${QSVENCC_VERSION}_amd64.deb" && tar xf data.tar
+    - mkdir thirdparty/QSVEncC
+    - cp usr/bin/qsvencc thirdparty/QSVEncC/QSVEncC.elf
+    - perl -0pi -e 's#/usr/lib/x86_64-linux-gnu#/bundle/disabled/path/001#g; s#/usr/lib64#/bad/path9#g; s#/usr/lib#/bad/lib#g' thirdparty/QSVEncC/QSVEncC.elf
+    - chmod a+x thirdparty/QSVEncC/QSVEncC.elf
+    - patchelf --set-rpath '$ORIGIN:$ORIGIN/../Library' thirdparty/QSVEncC/QSVEncC.elf
+    - curl -fSL -o thirdparty/QSVEncC/License.txt https://raw.githubusercontent.com/rigaya/QSVEnc/master/license.txt
+    - curl -fSLO "https://github.com/rigaya/NVEnc/releases/download/$NVENCC_VERSION/nvencc_${NVENCC_VERSION}_amd64.deb"
+    - 7z x -y "nvencc_${NVENCC_VERSION}_amd64.deb" && tar xf data.tar
+    - mkdir thirdparty/NVEncC
+    - cp usr/bin/nvencc thirdparty/NVEncC/NVEncC.elf
+    - chmod a+x thirdparty/NVEncC/NVEncC.elf
+    - patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' thirdparty/NVEncC/NVEncC.elf
+    - curl -fSL -o thirdparty/NVEncC/License.txt https://raw.githubusercontent.com/rigaya/NVEnc/master/NVEnc_license.txt
+    - curl -fSLO "https://github.com/rigaya/VCEEnc/releases/download/$VCEENCC_VERSION/vceencc_${VCEENCC_VERSION}_amd64.deb"
+    - 7z x -y "vceencc_${VCEENCC_VERSION}_amd64.deb" && tar xf data.tar
+    - mkdir thirdparty/VCEEncC
+    - cp usr/bin/vceencc thirdparty/VCEEncC/VCEEncC.elf
+    - chmod a+x thirdparty/VCEEncC/VCEEncC.elf
+    - patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' thirdparty/VCEEncC/VCEEncC.elf
+    - curl -fSL -o thirdparty/VCEEncC/License.txt https://raw.githubusercontent.com/rigaya/VCEEnc/master/VCEEnc_license.txt
+    - !reference [.thirdparty-linux-python, script]
+
+thirdparty-linux-arm64:
+  extends: .thirdparty-linux
+  tags: [saas-linux-small-arm64]
+  variables:
+    ARCH: arm64
+    PYTHON_ARCH_NAME: aarch64
+    FFMPEG_PLATFORM: linuxarm64
+    ARTIFACT_SUFFIX: '-arm'
+  script:
+    - mkdir thirdparty/Library
+    - mkdir debs && (cd debs && apt-get download libasound2 libass9 libbluray2 libexpat1 libfontconfig1 libfreetype6 libfribidi0 libglib2.0-0 libgomp1 libgraphite2-3 libharfbuzz0b libicu66 liblzma5 libmp3lame0 libogg0 libopus0 libpcre3 libpng16-16 libsoxr0 libspeex1 libssl1.1 libtwolame0 libuuid1 libvorbis0a libvorbisenc2 libvpx6 libxml2 zlib1g)
+    - (cd debs && curl -fSLO https://github.com/tsukumijima/mpp-rockchip/releases/download/v1.5.0-1-20250110-194af18/librockchip-mpp1_1.5.0-1_arm64.deb)
+    - (cd debs && curl -fSLO https://github.com/tsukumijima/librga-rockchip/releases/download/v2.2.0-1-20260105-bfd411b/librga2_2.2.0-1_arm64.deb)
+    - for fn in debs/*.deb; do dpkg-deb -x "$fn" "$PWD/thirdparty/Library"; done
+    - cp -ar thirdparty/Library/lib/aarch64-linux-gnu/* thirdparty/Library/
+    - rm -rf thirdparty/Library/lib/
+    - cp -ar thirdparty/Library/usr/lib/aarch64-linux-gnu/* thirdparty/Library/
+    - rm -rf thirdparty/Library/usr/ thirdparty/Library/pkgconfig
+    - find thirdparty/Library/*.so* -not -type l -not -type d | while read fn; do patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' $fn; done
+    - find thirdparty/Library/*.so* -not -type l -not -type d | xargs chmod a+x
+    - curl -fSLO "https://github.com/rigaya/rkmppenc/releases/download/$RKMPPENC_VERSION/rkmppenc_${RKMPPENC_VERSION}_arm64.deb"
+    - 7z x -y "rkmppenc_${RKMPPENC_VERSION}_arm64.deb" && tar xf data.tar
+    - mkdir thirdparty/rkmppenc
+    - cp usr/bin/rkmppenc thirdparty/rkmppenc/rkmppenc.elf
+    - chmod a+x thirdparty/rkmppenc/rkmppenc.elf
+    - patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' thirdparty/rkmppenc/rkmppenc.elf
+    - curl -fSL -o thirdparty/rkmppenc/License.txt https://raw.githubusercontent.com/rigaya/rkmppenc/master/rkmppenc_license.txt
+    - !reference [.thirdparty-linux-python, script]
+
+.thirdparty-linux-python:
+  script:
+    - curl -fSL -o python.tar.gz "https://github.com/indygreg/python-build-standalone/releases/download/$PYTHON_TAG/cpython-$PYTHON_VERSION+$PYTHON_TAG-$PYTHON_ARCH_NAME-unknown-linux-gnu-install_only_stripped.tar.gz"
+    - tar xf python.tar.gz
+    - mv python thirdparty/Python
+    - cp -r .github/workflows/scripts/poetry "thirdparty/Python/lib/python$PYTHON_MAJOR_VERSION/site-packages/poetry"
+    - (cd thirdparty/Python && ./bin/python -m pip install uv==$UV_VERSION)
+    - tar cf "thirdparty-linux$ARTIFACT_SUFFIX.tar" thirdparty
+    - 7z a -txz -m0=LZMA2 -mx=9 -md=128m -mfb=128 -mmt=on "thirdparty-linux$ARTIFACT_SUFFIX.tar.xz" "thirdparty-linux$ARTIFACT_SUFFIX.tar"
+
+create-release-commit:
+  stage: prepare
+  image: node:20.16.0-bookworm
+  resource_group: create-release-commit
+  variables:
+    GIT_DEPTH: "0"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $CI_TASK == "release-commit"
+  script:
+    - curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | sh
+    - export PATH="$HOME/.local/bin:$PATH"
+    - |
+      VERSION="${RELEASE_VERSION#v}"
+      if [ -z "$VERSION" ]; then
+        VERSION="$(TZ=Asia/Tokyo date '+%Y.%-m.%-d')"
+      fi
+      git fetch origin main develop --tags
+      if git rev-parse -q --verify "refs/tags/v${VERSION}" > /dev/null; then
+        echo "Tag v${VERSION} already exists." >&2
+        exit 1
+      fi
+      RELEASE_BASE="$CI_PROJECT_URL/-/releases/v${VERSION}/downloads"
+      git config user.name "$GITLAB_USER_NAME"
+      git config user.email "$GITLAB_USER_EMAIL"
+      git checkout -B main origin/main
+      git read-tree --reset -u origin/develop
+      sed -i -e "s|\"version\": \".*\",|\"version\": \"${VERSION}\",|" client/package.json
+      sed -i -e "s|^version = \".*\"|version = \"${VERSION}\"|" installer/pyproject.toml
+      sed -i -e "s|TARGET_VERSION = '.*'|TARGET_VERSION = '${VERSION}'|" installer/KonomiTV-Installer.py
+      sed -i -e "s|^version = \".*\"|version = \"${VERSION}\"|" server/pyproject.toml
+      sed -i -e "s|VERSION = '.*'|VERSION = '${VERSION}'|" server/app/constants.py
+      sed -i -e "s|https://[^ )\"']*/v[0-9.]*/\(downloads/\)\{0,1\}KonomiTV-Installer\.elf|${RELEASE_BASE}/KonomiTV-Installer.elf|" Readme.md
+      sed -i \
+        -e "s|^# RUN aria2c -x10 https://.*/thirdparty-linux\.tar\.xz$|RUN aria2c -x10 ${RELEASE_BASE}/thirdparty-linux.tar.xz|" \
+        -e "s|^RUN aria2c -x10 https://.*/v[0-9.]*/\(downloads/\)\{0,1\}thirdparty-linux\.tar\.xz$|RUN aria2c -x10 ${RELEASE_BASE}/thirdparty-linux.tar.xz|" \
+        -e "s|^# RUN tar xvf thirdparty-linux\.tar\.xz$|RUN tar xvf thirdparty-linux.tar.xz|" \
+        -e "s|^RUN aria2c -x10 https://nightly\.link/|# RUN aria2c -x10 https://nightly.link/|" \
+        -e "s|^RUN unzip thirdparty-linux\.tar\.xz\.zip|# RUN unzip thirdparty-linux.tar.xz.zip|" \
+        Dockerfile
+      grep -q "^RUN aria2c -x10 ${RELEASE_BASE}/thirdparty-linux\.tar\.xz$" Dockerfile
+      (cd server/ && uv lock)
+      (cd installer/ && uv lock)
+      (cd client/ && yarn install --frozen-lockfile && yarn build)
+      git add -A
+      git add -f client/dist/
+      git commit -m "v${VERSION}"
+      git remote set-url origin "https://oauth2:${RELEASE_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+      git push origin HEAD:main
+      git tag "v${VERSION}"
+      git push origin "v${VERSION}"
+
+publish-release-tag:
+  stage: prepare
+  image: alpine:3.20
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $CI_TASK == "publish-release"
+  script:
+    - apk add --no-cache curl
+    - test -n "$RELEASE_VERSION"
+    - |
+      curl --fail-with-body -X POST -H "PRIVATE-TOKEN: $RELEASE_TOKEN" --data-urlencode "tag_name=v${RELEASE_VERSION#v}" --data-urlencode "ref=$RELEASE_REF" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/repository/tags"
+
+publish-release:
+  stage: release
+  image: alpine:3.20
+  variables:
+    GIT_DEPTH: "0"
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+  needs:
+    - installer-windows
+    - installer-linux-amd64
+    - installer-linux-arm64
+    - thirdparty-windows
+    - thirdparty-linux-amd64
+    - thirdparty-linux-arm64
+  script:
+    - apk add --no-cache curl jq git
+    - mv installer/dist/KonomiTV-Installer.exe installer/dist/KonomiTV-Installer*.elf .
+    - |
+      api="$CI_API_V4_URL/projects/$CI_PROJECT_ID"
+      prev=$(git describe --tags --abbrev=0 --match 'v*' "$CI_COMMIT_TAG^" 2>/dev/null || true)
+      notes=$(git log --format='- %s (%h)' ${prev:+$prev..}"$CI_COMMIT_TAG")
+      if ! curl -sf -H "JOB-TOKEN: $CI_JOB_TOKEN" "$api/releases/$CI_COMMIT_TAG" > /dev/null; then
+        jq -n --arg tag "$CI_COMMIT_TAG" --arg desc "$notes" '{tag_name: $tag, name: $tag, description: $desc}' > release.json
+        curl --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" -H "Content-Type: application/json" -d @release.json "$api/releases"
+      fi
+      existing=$(curl -sf -H "JOB-TOKEN: $CI_JOB_TOKEN" "$api/releases/$CI_COMMIT_TAG/assets/links")
+      for f in KonomiTV-Installer.exe KonomiTV-Installer.elf KonomiTV-Installer-ARM.elf thirdparty-windows.7z thirdparty-linux.tar.xz thirdparty-linux-arm.tar.xz; do
+        u="$api/packages/generic/release/$CI_COMMIT_TAG/$f"
+        curl --fail -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$f" "$u"
+        for id in $(echo "$existing" | jq -r --arg n "$f" '.[] | select(.name == $n) | .id'); do
+          curl -sf -X DELETE -H "JOB-TOKEN: $CI_JOB_TOKEN" "$api/releases/$CI_COMMIT_TAG/assets/links/$id" > /dev/null
+        done
+        curl --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" --data-urlencode "name=$f" --data-urlencode "url=$u" --data-urlencode "direct_asset_path=/$f" --data "link_type=package" "$api/releases/$CI_COMMIT_TAG/assets/links"
+      done
+
+docker:
+  stage: docker
+  image: docker:27
+  services:
+    - docker:27-dind
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+      needs: [publish-release]
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"
+      needs: []
+    - if: $CI_PIPELINE_SOURCE == "web" && $CI_TASK == "docker"
+      needs: []
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        tags="-t $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG -t $CI_REGISTRY_IMAGE:latest"
+      else
+        tags="-t $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+      fi
+    - docker buildx create --use
+    - docker buildx build --push --provenance=false --cache-from "type=registry,ref=$CI_REGISTRY_IMAGE:buildcache" --cache-to "type=registry,ref=$CI_REGISTRY_IMAGE:buildcache,mode=max" $tags .
