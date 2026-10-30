@@ -28,20 +28,16 @@ export function openWithTransition(tileImage: HTMLImageElement | null, open: () 
     }
     tileImage.style.setProperty('view-transition-name', 'capture-lightbox-image');
     // 画面全体ではなく、拡大していく画像だけを撮らせる (CaptureLightbox.vue のスタイルを参照)
-    document.documentElement.classList.add('capture-lightbox-transition');
+    // 開くときは、原寸の画像のデコードを待たずに動き出し、拡大していく間はタイルの画像を引き伸ばして表示する
+    // 原寸の画像のデコードには数十〜百ミリ秒かかり、待つとその間は画面が止まって見えるため
+    document.documentElement.classList.add('capture-lightbox-transition', 'capture-lightbox-opening');
     const transition = document.startViewTransition(async () => {
         // 開いた後の画面では、名前を1枚表示の画像 (CaptureLightbox.vue) へ渡す
         tileImage.style.removeProperty('view-transition-name');
         open();
         await nextTick();
-        // 1枚表示の画像の描画が間に合うよう、デコードを待ってから開いた後の画面を撮らせる (同じ URL なのでキャッシュから読まれる)
-        const target = document.querySelector<HTMLImageElement>('.capture-lightbox__image--current');
-        if (target !== null) {
-            await Promise.race([
-                target.decode().catch(() => undefined),
-                new Promise(resolve => window.setTimeout(resolve, 100)),
-            ]);
-        }
     });
-    void transition.finished.finally(() => document.documentElement.classList.remove('capture-lightbox-transition'));
+    void transition.finished.finally(() => {
+        document.documentElement.classList.remove('capture-lightbox-transition', 'capture-lightbox-opening');
+    });
 }

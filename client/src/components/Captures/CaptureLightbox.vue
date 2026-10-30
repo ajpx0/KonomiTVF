@@ -73,7 +73,7 @@
                                 :style="{ left: `calc(${slide.offset * 100}% + ${slide.offset * SLIDE_GAP}px)` }"
                                 @click.self="onStageClick">
                                 <img v-if="slide.capture !== null" class="capture-lightbox__image" :src="Captures.getImageURL(slide.capture)"
-                                    :class="{'capture-lightbox__image--current': slide.offset === 0}"
+                                    :class="{'capture-lightbox__image--current': slide.offset === 0}" decoding="async"
                                     :style="slide.offset === 0 ? zoomStyle : undefined"
                                     :alt="slide.capture.caption_text ?? ''" draggable="false"
                                     @touchstart="onImageTouchStart" @pointerdown="onImagePointerDown" @pointermove="onImagePointerMove"
@@ -1481,6 +1481,12 @@ html.capture-lightbox-closing .capture-lightbox__image--current {
 ::view-transition-group(capture-lightbox-image) {
     animation-duration: 0.2s;
     animation-timing-function: cubic-bezier(0.26, 0.68, 0.55, 0.99);
+}
+// 開くときは、タイルの画像のスナップショットをフェードさせずに下に敷いたまま拡大し、
+// 原寸の画像はデコードが終わって描画された時点で上に重ねて表示する (CaptureTransition.ts の openWithTransition() を参照)
+html.capture-lightbox-opening::view-transition-old(capture-lightbox-image),
+html.capture-lightbox-opening::view-transition-new(capture-lightbox-image) {
+    animation: none;
 }
 ::view-transition-old(capture-lightbox-image),
 ::view-transition-new(capture-lightbox-image) {
