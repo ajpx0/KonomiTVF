@@ -81,7 +81,9 @@ const REVEAL_TOP_MARGIN = 72;
 const REVEAL_BOTTOM_MARGIN = 96;
 // ブラウザが扱える要素の高さには上限 (Chrome では約 3,355 万 px) があり、百万枚規模ではそれを超える
 // そのため要素の高さはこの値までにとどめ、要素の上端に当たるタイムラインの位置 (baseOffset) をずらしながら、その範囲だけを描画する
-const MAX_DOM_HEIGHT = 8_000_000;
+// macOS の Chrome では、画面の倍率が 2 のときに要素の上端から約 420 万 px (約 840 万デバイスピクセル) より下に置いたタイルが描画されないため、
+// 倍率が 3 の端末でもその範囲に収まる 200 万 px までにとどめる
+const MAX_DOM_HEIGHT = 2_000_000;
 const rootRef = ref<HTMLElement | null>(null);
 const containerWidth = ref(0);
 const viewportHeight = ref(window.innerHeight);
@@ -361,7 +363,7 @@ const updateViewport = () => {
     const isAtPageTop = window.scrollY <= 0;
     const isAtPageBottom = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 1;
     // 要素の範囲の端の4分の1まで来たら、今の位置が範囲の真ん中に来るようにずらし、同じ量だけページのスクロールを戻す
-    // 描画する位置も同じ量だけずれるので見た目は動かず、そのままスクロールを続けられる (ずらすのは数百万 px スクロールするごとに1回だけ)
+    // 描画する位置も同じ量だけずれるので見た目は動かず、そのままスクロールを続けられる (ずらすのは数十万 px スクロールするごとに1回だけ)
     const edgeMargin = MAX_DOM_HEIGHT / 4;
     const isNearTop = domScrollOffset < edgeMargin && baseOffset.value > 0;
     const isNearBottom = domScrollOffset > domHeight.value - edgeMargin && baseOffset.value + domHeight.value < totalHeight.value;
