@@ -27,7 +27,9 @@ export function openWithTransition(tileImage: HTMLImageElement | null, open: () 
         return;
     }
     tileImage.style.setProperty('view-transition-name', 'capture-lightbox-image');
-    document.startViewTransition(async () => {
+    // 画面全体ではなく、拡大していく画像だけを撮らせる (CaptureLightbox.vue のスタイルを参照)
+    document.documentElement.classList.add('capture-lightbox-transition');
+    const transition = document.startViewTransition(async () => {
         // 開いた後の画面では、名前を1枚表示の画像 (CaptureLightbox.vue) へ渡す
         tileImage.style.removeProperty('view-transition-name');
         open();
@@ -37,8 +39,9 @@ export function openWithTransition(tileImage: HTMLImageElement | null, open: () 
         if (target !== null) {
             await Promise.race([
                 target.decode().catch(() => undefined),
-                new Promise(resolve => window.setTimeout(resolve, 300)),
+                new Promise(resolve => window.setTimeout(resolve, 100)),
             ]);
         }
     });
+    void transition.finished.finally(() => document.documentElement.classList.remove('capture-lightbox-transition'));
 }

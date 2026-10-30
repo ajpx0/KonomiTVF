@@ -339,8 +339,10 @@ const close = async () => {
     isClosing = true;
     await props.reveal?.(current);
     let tileImage: HTMLImageElement | null = null;
+    // 画面全体ではなく、縮んでいく画像だけを撮らせる (下のスタイルを参照)
+    document.documentElement.classList.add('capture-lightbox-transition');
     const transition = document.startViewTransition(async () => {
-        // 閉じた後の画面では、フェードアウト中の1枚表示を隠し、名前を戻る先のタイルの画像へ渡す
+        // 閉じた後の画面では、フェードアウト中の1枚表示の画像を隠し、名前を戻る先のタイルの画像へ渡す
         document.documentElement.classList.add('capture-lightbox-closing');
         emit('update:capture', null);
         await nextTick();
@@ -352,6 +354,7 @@ const close = async () => {
     } finally {
         (tileImage as HTMLImageElement | null)?.style.removeProperty('view-transition-name');
         document.documentElement.classList.remove('capture-lightbox-closing');
+        document.documentElement.classList.remove('capture-lightbox-transition');
         isClosing = false;
     }
 };
@@ -1155,12 +1158,19 @@ onBeforeUnmount(() => {
 .capture-lightbox__image--current {
     view-transition-name: capture-lightbox-image;
 }
-// 一覧のタイルへ戻りながら閉じるときは、閉じた後の画面にフェードアウト中の1枚表示が写らないよう隠す (close() を参照)
-html.capture-lightbox-closing .capture-lightbox {
-    display: none;
+// 拡大表示を開閉するときは、画面全体のスナップショットを撮らずに、タイルと1枚表示をつなぐ画像だけを撮らせる
+// 一覧の画面全体を撮って重ねると、多数の画像を描き直すぶん動き出すまでに時間がかかるため
+// 背景の暗幕は、拡大表示のフェード (capture-lightbox-fade) でそのまま表示・非表示にする
+html.capture-lightbox-transition {
+    view-transition-name: none;
+}
+// 一覧のタイルへ戻りながら閉じるときは、フェードアウト中の1枚表示の画像を隠し、名前を戻る先のタイルの画像だけに付ける (close() を参照)
+html.capture-lightbox-closing .capture-lightbox__image--current {
+    visibility: hidden;
+    view-transition-name: none;
 }
 ::view-transition-group(capture-lightbox-image) {
-    animation-duration: 0.3s;
+    animation-duration: 0.2s;
     animation-timing-function: cubic-bezier(0.26, 0.68, 0.55, 0.99);
 }
 ::view-transition-old(capture-lightbox-image),
