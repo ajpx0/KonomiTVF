@@ -17,15 +17,21 @@ export function useCaptureSelection() {
     // Shift キーでの範囲選択の起点にする、最後にクリックしたキャプチャの ID
     const anchorId = ref<number | null>(null);
 
-    // キーボードで移動する起点にする、最後に選んだか矢印キーで移動したキャプチャの ID
+    // キーボードで移動する起点にする、最後に選んだか矢印キーで移動したキャプチャ
     // Shift キーと矢印キーで範囲を広げている間は、範囲選択の起点は動かさずにこちらだけを動かす (エクスプローラーや Finder と同じ)
-    const cursorId = ref<number | null>(null);
+    // Ctrl キーと矢印キーで動かしたときは、選択に含まれないキャプチャを指すこともある
+    const cursor = ref<ICapture | null>(null);
+
+    // Ctrl キーと矢印キーで、選択とは別にカーソルを動かしている間だけ、カーソルの位置に枠を表示する
+    // クリックや矢印キーだけでの移動では、カーソルは選んだキャプチャと同じ位置にあるため表示しない
+    const isCursorVisible = ref(false);
 
     // 選択中かどうか (1件でも選んでいれば選択モードとして扱う)
     const isSelecting = computed(() => selected.value.size > 0);
     const count = computed(() => selected.value.size);
 
     const isSelected = (capture: ICapture) => selected.value.has(capture.id);
+    const isCursor = (capture: ICapture) => isCursorVisible.value && cursor.value?.id === capture.id;
 
     /**
      * キャプチャの選択を切り替える
@@ -45,7 +51,8 @@ export function useCaptureSelection() {
                 }
                 selected.value = next;
                 anchorId.value = capture.id;
-                cursorId.value = capture.id;
+                cursor.value = capture;
+                isCursorVisible.value = false;
                 return;
             }
         }
@@ -57,7 +64,8 @@ export function useCaptureSelection() {
         }
         selected.value = next;
         anchorId.value = capture.id;
-        cursorId.value = capture.id;
+        cursor.value = capture;
+        isCursorVisible.value = false;
     };
 
     /**
@@ -67,7 +75,8 @@ export function useCaptureSelection() {
     const selectOnly = (capture: ICapture) => {
         selected.value = new Map([[capture.id, capture]]);
         anchorId.value = capture.id;
-        cursorId.value = capture.id;
+        cursor.value = capture;
+        isCursorVisible.value = false;
     };
 
     /**
@@ -88,17 +97,59 @@ export function useCaptureSelection() {
             next.set(item.id, item);
         }
         selected.value = next;
-        cursorId.value = capture.id;
+        cursor.value = capture;
+        isCursorVisible.value = false;
+    };
+
+    /**
+     * 選択を変更せずに、カーソルだけを指定したキャプチャへ動かす (Ctrl キーと矢印キーでの移動)
+     * @param capture 移動先のキャプチャ
+     */
+    const moveCursor = (capture: ICapture) => {
+        cursor.value = capture;
+        isCursorVisible.value = true;
+    };
+
+    /**
+     * カーソルの位置のキャプチャの選択を切り替える (Ctrl キーと Space キー)
+     * エクスプローラーと同じく、切り替えたキャプチャを Shift キーでの範囲選択の起点にする
+     * 最後の1枚の選択を外したときは、マウスで外したときと同じく選択モードを終える
+     */
+    const toggleCursor = () => {
+        if (cursor.value === null) {
+            return;
+        }
+        const next = new Map(selected.value);
+        if (next.has(cursor.value.id)) {
+            next.delete(cursor.value.id);
+        } else {
+            next.set(cursor.value.id, cursor.value);
+        }
+        if (next.size === 0) {
+            clear();
+            return;
+        }
+        selected.value = next;
+        anchorId.value = cursor.value.id;
+        isCursorVisible.value = true;
     };
 
     /**
      * キーボードで移動する起点のキャプチャを返す
-     * 起点のキャプチャが選択から外れているときは、最後に選んだキャプチャを返す
+     * Ctrl キーと矢印キーで動かしたカーソルは、選択に含まれていなくてもそのまま返す
+     * それ以外で起点のキャプチャが選択から外れているときは、最後に選んだキャプチャを返す
      * @returns キャプチャ (何も選んでいないときは null)
      */
     const getCursor = () => {
-        if (cursorId.value !== null && selected.value.has(cursorId.value)) {
-            return selected.value.get(cursorId.value)!;
+        if (cursor.value !== null) {
+            // お気に入りなどの変更で選択が新しい内容に差し替わっていれば、そちらを返す
+            const current = selected.value.get(cursor.value.id);
+            if (current !== undefined) {
+                return current;
+            }
+            if (isCursorVisible.value) {
+                return cursor.value;
+            }
         }
         return [...selected.value.values()].at(-1) ?? null;
     };
@@ -115,6 +166,11 @@ export function useCaptureSelection() {
                 next.set(capture.id, capture);
             } else {
                 next.delete(capture.id);
+                // 削除などで選択から外したキャプチャをカーソルが指していれば、カーソルも外す
+                if (cursor.value?.id === capture.id) {
+                    cursor.value = null;
+                    isCursorVisible.value = false;
+                }
             }
         }
         selected.value = next;
@@ -123,10 +179,25 @@ export function useCaptureSelection() {
     const clear = () => {
         selected.value = new Map();
         anchorId.value = null;
-        cursorId.value = null;
+        cursor.value = null;
+        isCursorVisible.value = false;
     };
 
-    return { selected, isSelecting, count, isSelected, toggle, selectOnly, selectRange, getCursor, setMany, clear };
+    return {
+        selected,
+        isSelecting,
+        count,
+        isSelected,
+        isCursor,
+        toggle,
+        selectOnly,
+        selectRange,
+        moveCursor,
+        toggleCursor,
+        getCursor,
+        setMany,
+        clear,
+    };
 }
 
 export type CaptureSelection = ReturnType<typeof useCaptureSelection>;

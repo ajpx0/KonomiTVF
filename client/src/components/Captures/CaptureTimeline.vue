@@ -19,6 +19,7 @@
                 <div class="capture-timeline__tile" :style="tile.style">
                     <CaptureTile v-if="tile.capture" :capture="tile.capture"
                         :selected="selection.isSelected(tile.capture)"
+                        :cursor="selection.isCursor(tile.capture)"
                         :selecting="selection.isSelecting.value"
                         @open="$emit('open', tile.capture)"
                         @toggle="(shiftKey) => onToggle(tile.capture!, shiftKey)"

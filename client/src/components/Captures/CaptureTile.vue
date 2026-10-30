@@ -3,6 +3,7 @@
     <div class="capture-tile" :data-capture-id="capture.id"
         :class="{
             'capture-tile--selected': selected,
+            'capture-tile--cursor': cursor,
             'capture-tile--selecting': selecting,
         }"
         @click="onClick"
@@ -53,11 +54,13 @@ import Captures, { ICapture } from '@/services/Captures';
 const props = withDefaults(defineProps<{
     capture: ICapture;
     selected?: boolean;
+    cursor?: boolean;
     selecting?: boolean;
     showPosition?: boolean;
     showCaption?: boolean;
 }>(), {
     selected: false,
+    cursor: false,
     selecting: false,
     showPosition: false,
     showCaption: false,
@@ -346,6 +349,15 @@ function getSharedObserver(): IntersectionObserver {
         .capture-tile__check {
             opacity: 1;
         }
+    }
+    // Ctrl キーと矢印キーで動かしているカーソルの位置は、選択の枠と区別できるよう白い枠で示す
+    &--cursor::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border: 2px solid rgb(var(--v-theme-text));
+        border-radius: inherit;
+        pointer-events: none;
     }
     &--selected {
         transform: scale(0.92);

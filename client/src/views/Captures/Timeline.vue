@@ -275,7 +275,7 @@ const onLightboxCaptureChange = (capture: ICapture | null) => {
 // 何も選んでいないときの矢印キーと Space は、ブラウザの既定の動作 (ページのスクロール) に任せる
 const selectionBarRef = ref<InstanceType<typeof CaptureSelectionBar> | null>(null);
 let isMovingByKeyboard = false;
-const moveByKeyboard = async (direction: 'Left' | 'Right' | 'Up' | 'Down', extend: boolean) => {
+const moveByKeyboard = async (direction: 'Left' | 'Right' | 'Up' | 'Down', mode: 'Select' | 'Extend' | 'Cursor') => {
     const cursor = selection.getCursor();
     // 隣の日を読み込んでいる間にキーが押し続けられても、移動を重ねずに1つずつ進める
     if (cursor === null || timelineRef.value === null || isMovingByKeyboard) {
@@ -289,8 +289,11 @@ const moveByKeyboard = async (direction: 'Left' | 'Right' | 'Up' | 'Down', exten
             return;
         }
         // Shift キーを押しているときは、範囲選択の起点から移動先までを選び、押していないときは移動先の1枚だけを選ぶ
-        if (extend) {
+        // Ctrl キーを押しているときは、エクスプローラーと同じく選択を変更せずにカーソルだけを動かす
+        if (mode === 'Extend') {
             selection.selectRange(target, timelineRef.value.orderedLoaded());
+        } else if (mode === 'Cursor') {
+            selection.moveCursor(target);
         } else {
             selection.selectOnly(target);
         }
@@ -320,15 +323,26 @@ const onKeyDown = (event: KeyboardEvent) => {
         case 'ArrowRight':
         case 'ArrowUp':
         case 'ArrowDown': {
-            if (isCtrlOrCmd || event.altKey) {
+            // カーソルだけを動かす操作は、エクスプローラーと同じく Mac でも Ctrl キーで行う
+            if (event.altKey || event.metaKey || (event.ctrlKey && event.shiftKey)) {
                 return;
             }
-            void moveByKeyboard(event.key.replace('Arrow', '') as 'Left' | 'Right' | 'Up' | 'Down', event.shiftKey);
+            const direction = event.key.replace('Arrow', '') as 'Left' | 'Right' | 'Up' | 'Down';
+            if (event.ctrlKey) {
+                void moveByKeyboard(direction, 'Cursor');
+            } else {
+                void moveByKeyboard(direction, event.shiftKey ? 'Extend' : 'Select');
+            }
             break;
         }
         // macOS のクイックルックと同じく、Space で選んでいるキャプチャを開く (もう一度 Space を押すと閉じる)
+        // Ctrl キーと Space キーを一緒に押したときは、エクスプローラーと同じくカーソルの位置のキャプチャの選択を切り替える
         case ' ':
         case 'Enter': {
+            if (event.ctrlKey && event.key === ' ' && event.altKey === false && event.shiftKey === false && event.metaKey === false) {
+                selection.toggleCursor();
+                break;
+            }
             if (isCtrlOrCmd || event.altKey || event.shiftKey) {
                 return;
             }
