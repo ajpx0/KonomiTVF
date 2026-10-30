@@ -27,6 +27,10 @@
                         <div v-ripple class="capture-lightbox__button" v-ftooltip.bottom="'ダウンロード (D)'" @click="download">
                             <Icon icon="fluent:arrow-download-24-regular" width="24px" />
                         </div>
+                        <!-- 拡大 (拡大している間にもう一度押すと元の大きさに戻す) -->
+                        <div v-ripple class="capture-lightbox__button" v-ftooltip.bottom="isZoomed ? '元の大きさに戻す' : '拡大'" @click="toggleZoom">
+                            <Icon :icon="isZoomed ? 'fluent:zoom-out-24-regular' : 'fluent:zoom-in-24-regular'" width="24px" />
+                        </div>
                         <!-- 情報 (横画面では右のパネル、縦画面では下のシート) の開閉 (開いている間はアイコンを塗りつぶしにする) -->
                         <div v-ripple class="capture-lightbox__button" v-ftooltip.bottom="isInfoOpen ? '情報を閉じる (I)' : '情報を開く (I)'"
                             @click="setInfoOpen(!isInfoOpen)">
@@ -61,14 +65,19 @@
                     <div ref="stageRef" class="capture-lightbox__stage" :style="stageStyle"
                         @click.self="onStageClick"
                         @touchstart="onStageTouchStart" @touchmove="onStageTouchMove"
-                        @touchend="onStageTouchEnd" @touchcancel="onStageTouchEnd">
+                        @touchend="onStageTouchEnd" @touchcancel="onStageTouchEnd"
+                        @wheel="onStageWheel" @gesturestart="onStageGestureStart" @gesturechange="onStageGestureChange"
+                        @gestureend="onStageGestureEnd">
                         <div class="capture-lightbox__track" :style="trackStyle" @click.self="onStageClick">
                             <div v-for="slide in slides" :key="slide.key" class="capture-lightbox__slide"
                                 :style="{ left: `calc(${slide.offset * 100}% + ${slide.offset * SLIDE_GAP}px)` }"
                                 @click.self="onStageClick">
                                 <img v-if="slide.capture !== null" class="capture-lightbox__image" :src="Captures.getImageURL(slide.capture)"
                                     :class="{'capture-lightbox__image--current': slide.offset === 0}"
-                                    :alt="slide.capture.caption_text ?? ''" draggable="false">
+                                    :style="slide.offset === 0 ? zoomStyle : undefined"
+                                    :alt="slide.capture.caption_text ?? ''" draggable="false"
+                                    @touchstart="onImageTouchStart" @pointerdown="onImagePointerDown" @pointermove="onImagePointerMove"
+                                    @pointerup="onImagePointerUp" @pointercancel="onImagePointerUp">
                             </div>
                         </div>
                         <div v-ripple class="capture-lightbox__nav capture-lightbox__nav--prev"
@@ -78,6 +87,26 @@
                         <div v-ripple class="capture-lightbox__nav capture-lightbox__nav--next"
                             :class="{'capture-lightbox__nav--hidden': nextCapture === null}" @click.stop="move(1)">
                             <Icon icon="fluent:chevron-right-24-regular" width="32px" />
+                        </div>
+                    </div>
+
+                    <!-- 拡大している間は、画像のどこを表示しているかを示す縮小図と、拡大率のスライダーを出す (マウスを動かしている間だけ出す) -->
+                    <div v-if="isZoomed" class="capture-lightbox__zoom">
+                        <div class="capture-lightbox__zoom-map"
+                            @pointerdown="onZoomMapPointerDown" @pointermove="onZoomMapPointerMove"
+                            @pointerup="onZoomMapPointerUp" @pointercancel="onZoomMapPointerUp">
+                            <img class="capture-lightbox__zoom-image" :src="Captures.getImageURL(capture)" alt="" draggable="false">
+                            <div class="capture-lightbox__zoom-view" :style="zoomViewStyle"></div>
+                        </div>
+                        <div class="capture-lightbox__zoom-slider">
+                            <div v-ripple class="capture-lightbox__zoom-step" @click="setZoom(zoom - ZOOM_STEP)">
+                                <Icon icon="fluent:subtract-16-filled" width="18px" />
+                            </div>
+                            <v-slider :model-value="zoom" :min="MIN_ZOOM" :max="MAX_ZOOM" :step="0.1" color="primary" track-color="text-darken-2"
+                                thumb-size="14" hide-details class="mx-1" @update:model-value="setZoom" />
+                            <div v-ripple class="capture-lightbox__zoom-step" @click="setZoom(zoom + ZOOM_STEP)">
+                                <Icon icon="fluent:add-16-filled" width="18px" />
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -335,6 +364,11 @@ const close = async () => {
         return;
     }
     isClosing = true;
+    // 拡大したまま閉じると、拡大した画像からタイルへ縮んでいくように見えるので、先に元の大きさへ戻す
+    if (isZoomed.value) {
+        resetZoom(true);
+        await nextTick();
+    }
     await props.reveal?.(current);
     let tileImage: HTMLImageElement | null = null;
     // 画面全体ではなく、縮んでいく画像だけを撮らせる (下のスタイルを参照)
@@ -655,6 +689,221 @@ const onStageClick = () => {
         return;
     }
     void close();
+};
+
+
+// ---------- 拡大 ----------
+
+// 拡大率は、拡大していないときの表示の大きさを 1 とした倍率で持つ (拡大のボタンを押すと 2 倍にする)
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 4;
+const DEFAULT_ZOOM = 2;
+const ZOOM_STEP = 0.5;
+const zoom = ref(MIN_ZOOM);
+// 拡大した画像の中心を、表示する領域の中心からずらしている量 (px)
+const panX = ref(0);
+const panY = ref(0);
+// ドラッグに追従している間と、閉じる前に元の大きさへ戻す瞬間は、アニメーションを止める
+const isZoomFollowing = ref(false);
+const isZoomed = computed(() => zoom.value > MIN_ZOOM);
+
+// 拡大していないときの画像の表示の大きさと、画像を表示する領域の大きさ (拡大率を変えたときと、ずらしたときに取り直す)
+const zoomBox = ref({ imageWidth: 0, imageHeight: 0, stageWidth: 0, stageHeight: 0 });
+const measureZoomBox = () => {
+    const image = stageRef.value?.querySelector<HTMLImageElement>('.capture-lightbox__image--current');
+    if (image === undefined || image === null || stageRef.value === null) {
+        return;
+    }
+    // offsetWidth と offsetHeight は transform の拡大を含まない、元の表示の大きさを返す
+    zoomBox.value = {
+        imageWidth: image.offsetWidth,
+        imageHeight: image.offsetHeight,
+        stageWidth: stageRef.value.clientWidth,
+        stageHeight: stageRef.value.clientHeight,
+    };
+};
+
+// 拡大した画像の端が、表示する領域の内側に入り込まないところまでだけずらせるようにする
+const setPan = (x: number, y: number) => {
+    const box = zoomBox.value;
+    const maxX = Math.max(0, (box.imageWidth * zoom.value - box.stageWidth) / 2);
+    const maxY = Math.max(0, (box.imageHeight * zoom.value - box.stageHeight) / 2);
+    panX.value = Math.min(Math.max(x, -maxX), maxX);
+    panY.value = Math.min(Math.max(y, -maxY), maxY);
+};
+
+// 拡大率を変えても、表示している場所の中心が変わらないようにする
+// トラックパッドのピンチでは、指の間にある場所 (マウスカーソルの位置) が動かないように拡大する
+const setZoom = (value: number, focus: { clientX: number; clientY: number } | null = null) => {
+    measureZoomBox();
+    const next = Math.min(Math.max(value, MIN_ZOOM), MAX_ZOOM);
+    const ratio = next / zoom.value;
+    // 拡大の中心にする位置の、表示する領域の中心からのずれ (指定がなければ領域の中心)
+    let focusX = 0;
+    let focusY = 0;
+    if (focus !== null && stageRef.value !== null) {
+        const rect = stageRef.value.getBoundingClientRect();
+        focusX = focus.clientX - (rect.left + rect.width / 2);
+        focusY = focus.clientY - (rect.top + rect.height / 2);
+    }
+    zoom.value = next;
+    setPan(focusX - (focusX - panX.value) * ratio, focusY - (focusY - panY.value) * ratio);
+    showControl();
+};
+const resetZoom = (instant = false) => {
+    isZoomFollowing.value = instant;
+    zoom.value = MIN_ZOOM;
+    panX.value = 0;
+    panY.value = 0;
+    // アニメーションなしで戻したときは、戻した位置が描画されてから、次に拡大するときのアニメーションを戻す
+    if (instant) {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+            isZoomFollowing.value = false;
+        }));
+    }
+};
+const toggleZoom = () => {
+    if (isZoomed.value) {
+        resetZoom();
+    } else {
+        setZoom(DEFAULT_ZOOM);
+    }
+};
+
+// 隣のキャプチャへ送ったら、元の大きさに戻す
+watch(() => props.capture?.id, () => resetZoom(true));
+
+const zoomStyle = computed(() => ({
+    transform: `translate3d(${panX.value}px, ${panY.value}px, 0) scale(${zoom.value})`,
+    transition: isZoomFollowing.value ? 'none' : `transform 0.2s ${EASING}`,
+    cursor: isZoomed.value ? (isZoomFollowing.value ? 'grabbing' : 'grab') : undefined,
+}));
+
+// 縮小図の中で、いま表示している範囲を示す枠の位置と大きさ (縮小図の大きさに対する割合)
+const zoomViewStyle = computed(() => {
+    const box = zoomBox.value;
+    const scaledWidth = box.imageWidth * zoom.value;
+    const scaledHeight = box.imageHeight * zoom.value;
+    if (scaledWidth === 0 || scaledHeight === 0) {
+        return {};
+    }
+    const width = Math.min(1, box.stageWidth / scaledWidth);
+    const height = Math.min(1, box.stageHeight / scaledHeight);
+    const centerX = 0.5 - panX.value / scaledWidth;
+    const centerY = 0.5 - panY.value / scaledHeight;
+    return {
+        left: `${(centerX - width / 2) * 100}%`,
+        top: `${(centerY - height / 2) * 100}%`,
+        width: `${width * 100}%`,
+        height: `${height * 100}%`,
+    };
+});
+
+// 拡大している間は、画像をドラッグして表示する場所をずらす (マウスでも指でも同じ)
+let panStart: { pointerId: number; x: number; y: number; panX: number; panY: number } | null = null;
+const onImagePointerDown = (event: PointerEvent) => {
+    if (!isZoomed.value) {
+        return;
+    }
+    event.preventDefault();
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    measureZoomBox();
+    panStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: panX.value, panY: panY.value };
+    isZoomFollowing.value = true;
+};
+const onImagePointerMove = (event: PointerEvent) => {
+    if (panStart === null || panStart.pointerId !== event.pointerId) {
+        return;
+    }
+    setPan(panStart.panX + event.clientX - panStart.x, panStart.panY + event.clientY - panStart.y);
+    showControl();
+};
+const onImagePointerUp = (event: PointerEvent) => {
+    if (panStart === null || panStart.pointerId !== event.pointerId) {
+        return;
+    }
+    panStart = null;
+    isZoomFollowing.value = false;
+};
+// 拡大している間の指の動きは、隣へ送るスワイプではなく表示する場所の移動として扱う
+const onImageTouchStart = (event: TouchEvent) => {
+    if (isZoomed.value) {
+        event.stopPropagation();
+    }
+};
+
+// トラックパッドのピンチと Ctrl キーを押しながらのホイールで拡大・縮小する
+// Chrome・Edge・Firefox はピンチを Ctrl キー付きのホイールとして、Safari は独自のジェスチャーのイベントとして送ってくる
+// どちらも既定ではページ全体を拡大してしまうので、拡大表示の中では止めて画像の拡大に使う
+let zoomGestureTimer: number | null = null;
+const followZoomGesture = () => {
+    // 指の動きに合わせて細かく拡大率が変わるので、動かしている間はアニメーションを止める
+    isZoomFollowing.value = true;
+    if (zoomGestureTimer !== null) {
+        window.clearTimeout(zoomGestureTimer);
+    }
+    zoomGestureTimer = window.setTimeout(() => {
+        isZoomFollowing.value = false;
+    }, 150);
+};
+const onStageWheel = (event: WheelEvent) => {
+    if (!event.ctrlKey) {
+        return;
+    }
+    // Safari のジェスチャーのイベントで拡大している間に、同じピンチが Ctrl キー付きのホイールとしても届いたときは、二重に拡大しないよう無視する
+    if (isGesturing) {
+        event.preventDefault();
+        return;
+    }
+    event.preventDefault();
+    followZoomGesture();
+    // ピンチは小さな量が続けて届き、マウスのホイールは1回で大きな量が届くので、1回あたりの変化に上限を設ける
+    const delta = Math.min(Math.max(event.deltaY, -50), 50);
+    setZoom(zoom.value * Math.exp(-delta * 0.01), event);
+};
+// Safari のジェスチャーのイベントは、ピンチを始めたときからの拡大率 (scale) を送ってくる
+let gestureStartZoom = MIN_ZOOM;
+let isGesturing = false;
+const onStageGestureStart = (event: Event) => {
+    event.preventDefault();
+    isGesturing = true;
+    gestureStartZoom = zoom.value;
+};
+const onStageGestureEnd = (event: Event) => {
+    event.preventDefault();
+    isGesturing = false;
+};
+const onStageGestureChange = (event: Event) => {
+    event.preventDefault();
+    followZoomGesture();
+    const gesture = event as Event & { scale: number; clientX: number; clientY: number };
+    setZoom(gestureStartZoom * gesture.scale, gesture);
+};
+
+// 縮小図を押したりドラッグしたりした位置が、表示する領域の中心に来るようにずらす
+let isZoomMapDragging = false;
+const moveToZoomMapPoint = (event: PointerEvent) => {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    setPan((0.5 - x) * zoomBox.value.imageWidth * zoom.value, (0.5 - y) * zoomBox.value.imageHeight * zoom.value);
+};
+const onZoomMapPointerDown = (event: PointerEvent) => {
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    isZoomMapDragging = true;
+    isZoomFollowing.value = true;
+    measureZoomBox();
+    moveToZoomMapPoint(event);
+};
+const onZoomMapPointerMove = (event: PointerEvent) => {
+    if (isZoomMapDragging) {
+        moveToZoomMapPoint(event);
+        showControl();
+    }
+};
+const onZoomMapPointerUp = () => {
+    isZoomMapDragging = false;
+    isZoomFollowing.value = false;
 };
 
 
@@ -1046,8 +1295,63 @@ onBeforeUnmount(() => {
         }
     }
 
+    // 拡大している間の縮小図と拡大率のスライダー (矢印と同じく、マウスを動かしている間だけ出す)
+    &__zoom {
+        position: absolute;
+        top: 60px;
+        right: 16px;
+        width: 260px;
+        padding: 10px;
+        border-radius: 12px;
+        background: rgb(var(--v-theme-background-lighten-1), 0.92);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.3s, visibility 0.3s;
+        z-index: 3;
+        user-select: none;
+        &-map {
+            position: relative;
+            overflow: hidden;
+            border-radius: 6px;
+            cursor: pointer;
+            touch-action: none;
+        }
+        &-image {
+            display: block;
+            width: 100%;
+            -webkit-user-drag: none;
+        }
+        &-view {
+            position: absolute;
+            border: 2px solid rgb(var(--v-theme-text));
+            border-radius: 3px;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+            pointer-events: none;
+        }
+        &-slider {
+            display: flex;
+            align-items: center;
+            margin-top: 6px;
+        }
+        &-step {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            color: rgb(var(--v-theme-text));
+            cursor: pointer;
+        }
+        @media (hover: none) {
+            display: none;
+        }
+    }
+
     &--control {
-        .capture-lightbox__nav {
+        .capture-lightbox__nav, .capture-lightbox__zoom {
             opacity: 1;
             visibility: visible;
         }
