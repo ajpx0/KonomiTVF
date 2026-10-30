@@ -3,7 +3,7 @@ import { AxiosError } from 'axios';
 
 import Message from '@/message';
 import APIClient from '@/services/APIClient';
-import Utils, { Semaphore } from '@/utils';
+import Utils, { dayjs, Semaphore } from '@/utils';
 
 
 /** キャプチャの一覧 */
@@ -429,6 +429,32 @@ class Captures {
      */
     static getImageURL(capture: ICapture): string {
         return `${Utils.api_base_url}/captures/${capture.id}/image?hash=${capture.file_hash}`;
+    }
+
+
+    /**
+     * キャプチャの画像を、保存先にあるファイル名でブラウザにダウンロードさせる
+     * 開発時は API のオリジンが画面と異なり、a 要素の download 属性が効かずに画像を開いてしまうため、Blob として取得してから保存させる
+     * 複数枚を渡したときは、選んだ順に1枚ずつ保存させる
+     * @param captures キャプチャのリスト
+     * @returns すべて保存できたかどうか
+     */
+    static async downloadImages(captures: ICapture[]): Promise<boolean> {
+        for (const capture of captures) {
+            const [detail, image] = await Promise.all([
+                Captures.fetchCapture(capture.id),
+                APIClient.get<Blob>(Captures.getImageURL(capture).replace(Utils.api_base_url, ''), { responseType: 'blob' }),
+            ]);
+            if (image.type === 'error') {
+                APIClient.showGenericError(image, 'キャプチャの画像をダウンロードできませんでした。');
+                return false;
+            }
+            // ファイル名を取得できなかったときは、撮影日時から KonomiTV のキャプチャと同じ形式のファイル名を付ける
+            const extension = image.data.type === 'image/png' ? 'png' : 'jpg';
+            const fileName = detail?.files[0]?.file_name ?? `Capture_${dayjs(capture.captured_at).format('YYYYMMDD-HHmmss')}.${extension}`;
+            Utils.downloadBlobData(image.data, fileName);
+        }
+        return true;
     }
 
 

@@ -388,6 +388,15 @@ const onKeyDown = (event: KeyboardEvent) => {
             selectionBarRef.value?.openTagDialog();
             break;
         }
+        // 拡大表示と同じく、D キーで選んでいるキャプチャをダウンロードする
+        case 'd':
+        case 'D': {
+            if (isCtrlOrCmd || event.altKey) {
+                return;
+            }
+            void selectionBarRef.value?.downloadSelected();
+            break;
+        }
         case 'Escape': {
             selection.clear();
             break;

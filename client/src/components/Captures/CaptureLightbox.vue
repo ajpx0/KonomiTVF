@@ -24,10 +24,9 @@
                         <div v-ripple class="capture-lightbox__button" v-ftooltip.bottom="'タグを付ける (T)'" @click="openTagDialog">
                             <Icon icon="fluent:tag-24-regular" width="24px" />
                         </div>
-                        <a v-ripple class="capture-lightbox__button" v-ftooltip.bottom="'ダウンロード'"
-                            :href="Captures.getImageURL(capture)" :download="downloadName" @click.stop>
+                        <div v-ripple class="capture-lightbox__button" v-ftooltip.bottom="'ダウンロード (D)'" @click="download">
                             <Icon icon="fluent:arrow-download-24-regular" width="24px" />
-                        </a>
+                        </div>
                         <!-- 情報 (横画面では右のパネル、縦画面では下のシート) の開閉 (開いている間はアイコンを塗りつぶしにする) -->
                         <div v-ripple class="capture-lightbox__button" v-ftooltip.bottom="isInfoOpen ? '情報を閉じる (I)' : '情報を開く (I)'"
                             @click="setInfoOpen(!isInfoOpen)">
@@ -196,7 +195,6 @@ const tagNames = computed(() => {
     const ids = new Set(props.capture?.tag_ids ?? []);
     return tags.value.filter(tag => ids.has(tag.id)).map(tag => tag.name);
 });
-const downloadName = computed(() => detail.value?.files[0]?.file_name ?? `capture-${props.capture?.id}.jpg`);
 
 // 縦画面 (スマホとタブレットの縦持ち) では情報を下のシートに、それ以外では右のパネルに出す
 // 区切りは視聴画面でパネルが下に回る条件と同じにする
@@ -717,6 +715,12 @@ const openTagDialog = () => {
         isTagDialogOpen.value = true;
     }
 };
+// 表示しているキャプチャを、保存先にあるファイル名でブラウザのダウンロードフォルダへ保存する
+const download = async () => {
+    if (props.capture !== null) {
+        await Captures.downloadImages([props.capture]);
+    }
+};
 const onTagsUpdated = async (captures: ICapture[]) => {
     if (captures[0] !== undefined) {
         // 応答を待つ間に隣のキャプチャへ送られても、戻ったときに新しいタグで出るよう、隣として覚えているキャプチャも差し替える
@@ -882,6 +886,7 @@ const onKeyDown = (event: KeyboardEvent) => {
         case 'Delete': requestDelete(); break;
         case 'f': case 'F': void toggleFavorite(); break;
         case 't': case 'T': openTagDialog(); break;
+        case 'd': case 'D': void download(); break;
         case 'i': case 'I': setInfoOpen(!isInfoOpen.value); break;
         default: return;
     }
