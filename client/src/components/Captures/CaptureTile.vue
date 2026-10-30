@@ -4,6 +4,7 @@
         :class="{
             'capture-tile--selected': selected,
             'capture-tile--cursor': cursor,
+            'capture-tile--previewed': previewed && !selected,
             'capture-tile--selecting': selecting,
         }"
         @click="onClick"
@@ -16,7 +17,7 @@
             :alt="capture.caption_text ?? ''" decoding="async" draggable="false" @load="isLoaded = true">
         <div class="capture-tile__shade"></div>
         <div v-ripple class="capture-tile__check" @click.stop="$emit('toggle', $event.shiftKey)">
-            <Icon :icon="selected ? 'fluent:checkmark-circle-24-filled' : 'fluent:circle-24-regular'" width="24px" height="24px" />
+            <Icon :icon="selected || previewed ? 'fluent:checkmark-circle-24-filled' : 'fluent:circle-24-regular'" width="24px" height="24px" />
         </div>
         <!-- お気に入りのボタン (お気に入りに追加済みなら常に出し、そうでなければマウスを乗せたときだけ出す) -->
         <!-- ログインしていないとき (is_favorite が null) は、お気に入りを使えないので出さない -->
@@ -55,12 +56,14 @@ const props = withDefaults(defineProps<{
     capture: ICapture;
     selected?: boolean;
     cursor?: boolean;
+    previewed?: boolean;
     selecting?: boolean;
     showPosition?: boolean;
     showCaption?: boolean;
 }>(), {
     selected: false,
     cursor: false,
+    previewed: false,
     selecting: false,
     showPosition: false,
     showCaption: false,
@@ -358,6 +361,17 @@ function getSharedObserver(): IntersectionObserver {
         border: 2px solid rgb(var(--v-theme-text));
         border-radius: inherit;
         pointer-events: none;
+    }
+    // Shift キーを押しながらマウスを乗せているときに、クリックすると選ばれる範囲は、選んだときより淡く示す
+    &--previewed {
+        outline: 3px solid rgb(var(--v-theme-primary), 0.5);
+        outline-offset: -3px;
+        .capture-tile__shade {
+            opacity: 1;
+        }
+        .capture-tile__check {
+            color: rgb(var(--v-theme-primary-lighten-1));
+        }
     }
     &--selected {
         transform: scale(0.92);

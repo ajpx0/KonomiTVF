@@ -1,5 +1,5 @@
 
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 
 import { ICapture } from '@/services/Captures';
 
@@ -26,11 +26,15 @@ export function useCaptureSelection() {
     // クリックや矢印キーだけでの移動では、カーソルは選んだキャプチャと同じ位置にあるため表示しない
     const isCursorVisible = ref(false);
 
+    // Shift キーを押しながらマウスを乗せているときに、クリックすると選ばれる範囲のキャプチャの ID (Google フォトと同じ)
+    const previewIds = ref(new Set<number>());
+
     // 選択中かどうか (1件でも選んでいれば選択モードとして扱う)
     const isSelecting = computed(() => selected.value.size > 0);
     const count = computed(() => selected.value.size);
 
     const isSelected = (capture: ICapture) => selected.value.has(capture.id);
+    const isPreviewed = (capture: ICapture) => previewIds.value.has(capture.id);
     const isCursor = (capture: ICapture) => isCursorVisible.value && cursor.value?.id === capture.id;
 
     /**
@@ -99,6 +103,27 @@ export function useCaptureSelection() {
         selected.value = next;
         cursor.value = capture;
         isCursorVisible.value = false;
+    };
+
+    /**
+     * Shift キーを押しながらクリックしたときに選ばれる範囲を、選ぶ前に示す
+     * @param capture マウスを乗せているキャプチャ (Shift キーを離したときやタイルから外れたときは null)
+     * @param ordered 画面での並び順のキャプチャ
+     */
+    const previewRange = (capture: ICapture | null, ordered: ICapture[]) => {
+        const from = ordered.findIndex(item => item.id === anchorId.value);
+        const to = capture === null ? -1 : ordered.findIndex(item => item.id === capture.id);
+        if (selected.value.size === 0 || from === -1 || to === -1) {
+            if (previewIds.value.size > 0) {
+                previewIds.value = new Set();
+            }
+            return;
+        }
+        const next = new Set<number>();
+        for (const item of ordered.slice(Math.min(from, to), Math.max(from, to) + 1)) {
+            next.add(item.id);
+        }
+        previewIds.value = next;
     };
 
     /**
@@ -188,10 +213,12 @@ export function useCaptureSelection() {
         isSelecting,
         count,
         isSelected,
+        isPreviewed,
         isCursor,
         toggle,
         selectOnly,
         selectRange,
+        previewRange,
         moveCursor,
         toggleCursor,
         getCursor,
@@ -201,3 +228,63 @@ export function useCaptureSelection() {
 }
 
 export type CaptureSelection = ReturnType<typeof useCaptureSelection>;
+
+
+/**
+ * 選択中に Shift キーを押しながらマウスを動かすと、クリックで選ばれる範囲をタイルに示す (Google フォトと同じ)
+ * マウスを乗せているタイルは、タイルの data-capture-id 属性から探す
+ * @param selection キャプチャの選択の状態
+ * @param getOrdered 画面での並び順のキャプチャを返す関数
+ */
+export function useCaptureRangePreview(selection: CaptureSelection, getOrdered: () => ICapture[]) {
+
+    // マウスを乗せているキャプチャの ID と Shift キーの状態は、変わったときだけ範囲を計算し直す
+    let hoveredId: number | null = null;
+    let isShiftPressed = false;
+
+    const update = () => {
+        if (hoveredId === null || isShiftPressed === false || selection.isSelecting.value === false) {
+            selection.previewRange(null, []);
+            return;
+        }
+        const ordered = getOrdered();
+        selection.previewRange(ordered.find(capture => capture.id === hoveredId) ?? null, ordered);
+    };
+
+    const onMouseMove = (event: MouseEvent) => {
+        if (selection.isSelecting.value === false) {
+            return;
+        }
+        const tile = event.target instanceof Element ? event.target.closest<HTMLElement>('.capture-tile[data-capture-id]') : null;
+        const id = tile !== null ? Number(tile.dataset.captureId) : null;
+        if (id !== hoveredId || event.shiftKey !== isShiftPressed) {
+            hoveredId = id;
+            isShiftPressed = event.shiftKey;
+            update();
+        }
+    };
+    const onKey = (event: KeyboardEvent) => {
+        if (event.key === 'Shift' && event.shiftKey !== isShiftPressed) {
+            isShiftPressed = event.shiftKey;
+            update();
+        }
+    };
+    // Shift キーを押したまま別のウインドウへ移ると keyup が届かないので、フォーカスを失ったら範囲の表示を消す
+    const onBlur = () => {
+        isShiftPressed = false;
+        update();
+    };
+
+    onMounted(() => {
+        window.addEventListener('mousemove', onMouseMove, { passive: true });
+        window.addEventListener('keydown', onKey);
+        window.addEventListener('keyup', onKey);
+        window.addEventListener('blur', onBlur);
+    });
+    onBeforeUnmount(() => {
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('keydown', onKey);
+        window.removeEventListener('keyup', onKey);
+        window.removeEventListener('blur', onBlur);
+    });
+}

@@ -20,6 +20,7 @@
                     <CaptureTile v-if="tile.capture" :capture="tile.capture"
                         :selected="selection.isSelected(tile.capture)"
                         :cursor="selection.isCursor(tile.capture)"
+                        :previewed="selection.isPreviewed(tile.capture)"
                         :selecting="selection.isSelecting.value"
                         @open="$emit('open', tile.capture)"
                         @toggle="(shiftKey) => onToggle(tile.capture!, shiftKey)"
@@ -42,7 +43,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 
 import CaptureScrubber, { IScrubberMark } from '@/components/Captures/CaptureScrubber.vue';
-import { CaptureSelection } from '@/components/Captures/CaptureSelection';
+import { CaptureSelection, useCaptureRangePreview } from '@/components/Captures/CaptureSelection';
 import CaptureTile from '@/components/Captures/CaptureTile.vue';
 import Captures, { CaptureTimelineAxis, ICapture, ICaptureFilter, ICaptureProgram } from '@/services/Captures';
 import { dayjs } from '@/utils';
@@ -468,6 +469,7 @@ const orderedLoaded = () => {
     }
     return result;
 };
+useCaptureRangePreview(props.selection, orderedLoaded);
 const onToggle = (capture: ICapture, shiftKey: boolean) => {
     props.selection.toggle(capture, shiftKey ? orderedLoaded() : null);
 };

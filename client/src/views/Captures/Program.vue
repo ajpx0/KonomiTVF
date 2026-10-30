@@ -56,7 +56,7 @@
                 <div v-for="capture in captures" :key="capture.id" class="capture-program__item">
                     <div class="capture-program__tile">
                         <CaptureTile :capture="capture" :show-position="order === 'PlaybackPosition'"
-                            :selected="selection.isSelected(capture)" :selecting="selection.isSelecting.value"
+                            :selected="selection.isSelected(capture)" :previewed="selection.isPreviewed(capture)" :selecting="selection.isSelecting.value"
                             @open="openedCapture = capture"
                             @toggle="(shiftKey) => selection.toggle(capture, shiftKey ? captures : null)"
                             @updated="onUpdated([$event])" />
@@ -80,7 +80,7 @@ import { useRoute } from 'vue-router';
 import CaptureLightbox from '@/components/Captures/CaptureLightbox.vue';
 import CapturePage from '@/components/Captures/CapturePage.vue';
 import CaptureProgramInfo from '@/components/Captures/CaptureProgramInfo.vue';
-import { useCaptureSelection } from '@/components/Captures/CaptureSelection';
+import { useCaptureRangePreview, useCaptureSelection } from '@/components/Captures/CaptureSelection';
 import CaptureSelectionBar from '@/components/Captures/CaptureSelectionBar.vue';
 import CaptureTile from '@/components/Captures/CaptureTile.vue';
 import Captures, { CaptureSortOrder, ICapture, ICaptureFilter, ICaptureProgram } from '@/services/Captures';
@@ -92,6 +92,8 @@ import { ProgramUtils } from '@/utils';
 const route = useRoute();
 const userStore = useUserStore();
 const selection = useCaptureSelection();
+// Shift キーを押しながらマウスを乗せたときに、クリックで選ばれる範囲を示す
+useCaptureRangePreview(selection, () => captures.value);
 
 const program = ref<ICaptureProgram | null>(null);
 const captures = ref<ICapture[]>([]);
