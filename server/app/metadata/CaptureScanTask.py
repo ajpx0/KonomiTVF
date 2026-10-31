@@ -1235,8 +1235,31 @@ class CaptureScanTask:
                             needs_scan = False
                             for change, path in changes:
                                 if change == Change.deleted:
-                                    needs_scan = True
-                                    break
+
+                                    # 登録済みの場所がないパスの削除は、確定するものがないので一括スキャンを始めずに次の通知へ進む
+                                    ## KonomiTV が削除したキャプチャは、ファイルを削除した直後に DB の行も削除しているので、ここで該当しなくなる
+                                    ## DB を読めないときは、確定を一括スキャンに任せる
+                                    deleted_path = NormalizeCapturePath(path)
+                                    try:
+                                        # 削除されたパスそのものが登録済みかを、file_path の UNIQUE 制約のインデックスで引く
+                                        is_registered = await CaptureFile.filter(file_path=deleted_path).exists()
+
+                                        # フォルダごと消されたときは、フォルダの中に登録済みの場所があるかで判定する
+                                        ## LIKE による前方一致はインデックスを使えずに全件を走査するため、パスの文字列の範囲で絞り込む
+                                        ## 区切り文字の次の文字を上限にすると、フォルダの区切りの後に続くパスだけが範囲に入る
+                                        ## 画像の拡張子で終わる名前のフォルダもあるため、パスの形では省略せずに判定する
+                                        if is_registered is False:
+                                            is_registered = await CaptureFile.filter(
+                                                file_path__gte = os.path.join(deleted_path, ''),
+                                                file_path__lt = deleted_path + chr(ord(os.sep) + 1),
+                                            ).exists()
+                                    except OperationalError:
+                                        is_registered = True
+                                    if is_registered is True:
+                                        needs_scan = True
+                                        break
+                                    continue
+
                                 if change == Change.added and Path(path).suffix.lower() not in self.CAPTURE_EXTENSIONS:
                                     if await anyio.Path(path).is_dir():
                                         needs_scan = True
