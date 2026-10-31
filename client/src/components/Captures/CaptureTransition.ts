@@ -14,26 +14,35 @@ export function findTileImage(capture_id: number): HTMLImageElement | null {
 
 
 /**
+ * 拡大表示の開閉を View Transitions API でアニメーションさせるかどうかを返す
+ * 対応していないブラウザと、動きを減らす設定のときは、アニメーションせずに開閉する
+ * @returns アニメーションさせるなら true
+ */
+export function canUseViewTransition(): boolean {
+    return document.startViewTransition !== undefined && window.matchMedia('(prefers-reduced-motion: reduce)').matches === false;
+}
+
+
+/**
  * 拡大表示を開くときに、View Transitions API でタイルの画像が1枚表示の画像の位置まで拡大していくように見せる
  * タイルの画像と1枚表示の画像に同じ名前を付けると、ブラウザが2つの位置と大きさをつないでアニメーションさせる
- * @param tileImage タイルの画像 (null ならアニメーションせずに開く)
+ * 拡大表示の暗幕・ボタン・情報欄は、画像の拡大と同時にフェードインさせる (CaptureLightbox.vue のスタイルを参照)
+ * @param tileImage タイルの画像 (null なら、画像の拡大なしにフェードインだけで開く)
  * @param open 拡大表示を開く処理
  */
 export function openWithTransition(tileImage: HTMLImageElement | null, open: () => void): void {
-    // 対応していないブラウザ、画像がまだ読み込めていないタイル、動きを減らす設定のときは、そのまま開く
-    if (document.startViewTransition === undefined || tileImage === null ||
-        window.matchMedia('(prefers-reduced-motion: reduce)').matches === true) {
+    if (document.startViewTransition === undefined || canUseViewTransition() === false) {
         open();
         return;
     }
-    tileImage.style.setProperty('view-transition-name', 'capture-lightbox-image');
-    // 画面全体ではなく、拡大していく画像だけを撮らせる (CaptureLightbox.vue のスタイルを参照)
+    tileImage?.style.setProperty('view-transition-name', 'capture-lightbox-image');
+    // 画面全体ではなく、拡大していく画像と拡大表示だけを撮らせる
     // 開くときは、原寸の画像のデコードを待たずに動き出し、拡大していく間はタイルの画像を引き伸ばして表示する
     // 原寸の画像のデコードには数十〜百ミリ秒かかり、待つとその間は画面が止まって見えるため
     document.documentElement.classList.add('capture-lightbox-transition', 'capture-lightbox-opening');
     const transition = document.startViewTransition(async () => {
         // 開いた後の画面では、名前を1枚表示の画像 (CaptureLightbox.vue) へ渡す
-        tileImage.style.removeProperty('view-transition-name');
+        tileImage?.style.removeProperty('view-transition-name');
         open();
         await nextTick();
     });

@@ -242,7 +242,7 @@ function getSharedObserver(): IntersectionObserver {
     cursor: pointer;
     user-select: none;
     -webkit-touch-callout: none;
-    transition: transform 0.12s ease;
+    transition: transform 0.12s ease, outline-color 0.15s ease;
 
     &__image {
         display: block;
@@ -322,6 +322,9 @@ function getSharedObserver(): IntersectionObserver {
         // 入れ物はクリックを下のタイルへ通すが、印はマウスを乗せたときに言葉を出せるようにする (クリックは親のタイルへ伝わる)
         pointer-events: auto;
     }
+    &__badges, &__position {
+        transition: opacity 0.15s ease;
+    }
 
     &__position {
         position: absolute;
@@ -371,6 +374,14 @@ function getSharedObserver(): IntersectionObserver {
         }
         .capture-tile__check {
             color: rgb(var(--v-theme-primary-lighten-1));
+        }
+    }
+    // 拡大表示を閉じてこのタイルへ縮んでいく間は、画像の上に重なる枠とアイコンを隠し、縮み終わってからフェードインさせる
+    // (縮んでいく画像の下に隠れたまま、縮み終わった瞬間に突然現れないようにするため。CaptureLightbox.vue の close() を参照)
+    &--landing {
+        outline-color: transparent !important;
+        .capture-tile__shade, .capture-tile__check, .capture-tile__favorite, .capture-tile__badges, .capture-tile__position {
+            opacity: 0 !important;
         }
     }
     &--selected {

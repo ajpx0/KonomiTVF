@@ -1,6 +1,7 @@
 <template>
     <Teleport to="body">
-        <transition name="capture-lightbox-fade">
+        <!-- View Transitions API で開閉するときは、フェードも View Transition で行うので、Vue のトランジションは使わない -->
+        <transition name="capture-lightbox-fade" :css="!canUseViewTransition()">
             <div v-if="capture !== null" ref="rootRef" class="capture-lightbox" tabindex="-1"
                 :class="{
                     'capture-lightbox--portrait': isPortrait,
@@ -74,7 +75,7 @@
                                 @click.self="onStageClick">
                                 <img v-if="slide.capture !== null" class="capture-lightbox__image" :src="Captures.getImageURL(slide.capture)"
                                     :class="{'capture-lightbox__image--current': slide.offset === 0}" decoding="async"
-                                    :style="slide.offset === 0 ? zoomStyle : undefined"
+                                    :style="[getImageSizeStyle(slide.capture), slide.offset === 0 ? zoomStyle : {}]"
                                     :alt="slide.capture.caption_text ?? ''" draggable="false"
                                     @touchstart="onImageTouchStart" @pointerdown="onImagePointerDown" @pointermove="onImagePointerMove"
                                     @pointerup="onImagePointerUp" @pointercancel="onImagePointerUp">
@@ -173,7 +174,7 @@ import { useRouter } from 'vue-router';
 
 import CaptureInfo from '@/components/Captures/CaptureInfo.vue';
 import CaptureTagDialog from '@/components/Captures/CaptureTagDialog.vue';
-import { findTileImage } from '@/components/Captures/CaptureTransition';
+import { canUseViewTransition, findTileImage } from '@/components/Captures/CaptureTransition';
 import Message from '@/message';
 import Captures, { ICapture, ICaptureDetail, ICaptureProgram, ICaptureTag } from '@/services/Captures';
 import Videos from '@/services/Videos';
@@ -333,6 +334,14 @@ const slides = computed(() => {
 });
 
 
+// 画像の表示の大きさは、読み込みを待たずにキャプチャの縦横の大きさから決める
+// 読み込む前の画像は大きさを持たず、開くときの View Transition が拡大していく先の位置と大きさを決められないため
+const getImageSizeStyle = (capture: ICapture) => ({
+    width: `min(100cqw, calc(100cqh * ${capture.image_width} / ${capture.image_height}))`,
+    aspectRatio: `${capture.image_width} / ${capture.image_height}`,
+});
+
+
 // ---------- 送りと閉じるの動き ----------
 
 // 横のずれ (指で引いている量か、送るアニメーションの行き先)
@@ -359,7 +368,7 @@ const close = async () => {
         return;
     }
     // 対応していないブラウザと、動きを減らす設定のときは、そのまま閉じる
-    if (document.startViewTransition === undefined || window.matchMedia('(prefers-reduced-motion: reduce)').matches === true) {
+    if (document.startViewTransition === undefined || canUseViewTransition() === false) {
         emit('update:capture', null);
         return;
     }
@@ -371,21 +380,22 @@ const close = async () => {
     }
     await props.reveal?.(current);
     let tileImage: HTMLImageElement | null = null;
-    // 画面全体ではなく、縮んでいく画像だけを撮らせる (下のスタイルを参照)
+    // 画面全体ではなく、縮んでいく画像と拡大表示だけを撮らせる (下のスタイルを参照)
     document.documentElement.classList.add('capture-lightbox-transition');
     const transition = document.startViewTransition(async () => {
-        // 閉じた後の画面では、フェードアウト中の1枚表示の画像を隠し、名前を戻る先のタイルの画像へ渡す
-        document.documentElement.classList.add('capture-lightbox-closing');
+        // 閉じた後の画面では、名前を戻る先のタイルの画像へ渡す
+        // 選択の枠・チェック・アイコンは画像の上に重なるので、縮み終わってからフェードインさせる (CaptureTile.vue の capture-tile--landing)
         emit('update:capture', null);
         await nextTick();
         tileImage = findTileImage(current.id);
         tileImage?.style.setProperty('view-transition-name', 'capture-lightbox-image');
+        tileImage?.closest('.capture-tile')?.classList.add('capture-tile--landing');
     });
     try {
         await transition.finished;
     } finally {
         (tileImage as HTMLImageElement | null)?.style.removeProperty('view-transition-name');
-        document.documentElement.classList.remove('capture-lightbox-closing');
+        (tileImage as HTMLImageElement | null)?.closest('.capture-tile')?.classList.remove('capture-tile--landing');
         document.documentElement.classList.remove('capture-lightbox-transition');
         isClosing = false;
     }
@@ -1251,6 +1261,8 @@ onBeforeUnmount(() => {
         top: 0;
         bottom: 0;
         width: 100%;
+        // 画像の大きさを、スライドの大きさに対する割合 (cqw・cqh) で決めるため
+        container-type: size;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -1467,16 +1479,23 @@ onBeforeUnmount(() => {
 .capture-lightbox__image--current {
     view-transition-name: capture-lightbox-image;
 }
-// 拡大表示を開閉するときは、画面全体のスナップショットを撮らずに、タイルと1枚表示をつなぐ画像だけを撮らせる
+// 拡大表示を開閉するときは、画面全体のスナップショットを撮らずに、タイルと1枚表示をつなぐ画像と、拡大表示 (暗幕・ボタン・情報欄) だけを撮らせる
 // 一覧の画面全体を撮って重ねると、多数の画像を描き直すぶん動き出すまでに時間がかかるため
-// 背景の暗幕は、拡大表示のフェード (capture-lightbox-fade) でそのまま表示・非表示にする
+// 拡大表示は、画像の拡大・縮小と同じ時間でフェードイン・フェードアウトさせ、その下には一覧の画面がそのまま見える
 html.capture-lightbox-transition {
     view-transition-name: none;
+    .capture-lightbox {
+        view-transition-name: capture-lightbox-ui;
+    }
 }
-// 一覧のタイルへ戻りながら閉じるときは、フェードアウト中の1枚表示の画像を隠し、名前を戻る先のタイルの画像だけに付ける (close() を参照)
-html.capture-lightbox-closing .capture-lightbox__image--current {
-    visibility: hidden;
-    view-transition-name: none;
+::view-transition-old(capture-lightbox-ui),
+::view-transition-new(capture-lightbox-ui) {
+    animation-duration: 0.2s;
+    animation-timing-function: ease;
+}
+// 開くときは、拡大表示より後から撮られる拡大していく画像が、拡大表示の下に隠れないよう前に出す
+::view-transition-group(capture-lightbox-image) {
+    z-index: 1;
 }
 ::view-transition-group(capture-lightbox-image) {
     animation-duration: 0.2s;
