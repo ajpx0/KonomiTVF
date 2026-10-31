@@ -18,6 +18,7 @@ from tests.conftest import FIXTURES_DIR
 # POST /api/captures (CaptureUploadAPI) - 異常系
 # -------------------------------------------------------------------------------------
 
+
 async def test_upload_capture__rejects_non_image_file(client: httpx.AsyncClient, capture_folder: Path) -> None:
     """
     画像として読めないファイルはキャプチャとして受け付けず、保存先フォルダにも残さない
@@ -100,6 +101,7 @@ async def test_upload_list_and_delete_capture(client: httpx.AsyncClient, admin_h
 # -------------------------------------------------------------------------------------
 # 放送時間未定の放送回の補完フロー (POST /api/captures → GET /api/captures/{capture_id} → DELETE /api/captures) - 正常系
 # -------------------------------------------------------------------------------------
+
 
 async def test_upload_capture_of_program_with_undecided_duration_then_fill_in(client: httpx.AsyncClient, admin_headers: dict[str, str]) -> None:
     """
