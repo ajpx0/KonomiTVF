@@ -78,15 +78,15 @@ jobs:
           sed -i -e "s|TARGET_VERSION = '.*'|TARGET_VERSION = '${VERSION}'|" installer/KonomiTV-Installer.py
           sed -i -e "s|^version = \".*\"|version = \"${VERSION}\"|" server/pyproject.toml
           sed -i -e "s|VERSION = '.*'|VERSION = '${VERSION}'|" server/app/constants.py
-          sed -i -e "s|https://github.com/.*/releases/download/v.*/KonomiTV-Installer\.elf|https://github.com/AariyJP/KonomiTVF/releases/download/v${VERSION}/KonomiTV-Installer.elf|" Readme.md
+          sed -i -e "s|https://github.com/.*/releases/download/v.*/KonomiTV-Installer\.elf|https://github.com/ajpx0/KonomiTVF/releases/download/v${VERSION}/KonomiTV-Installer.elf|" Readme.md
           sed -i \
-            -e "s|^# RUN aria2c -x10 https://github.com/.*/releases/download/v.*/thirdparty-linux\.tar\.xz$|RUN aria2c -x10 https://github.com/AariyJP/KonomiTVF/releases/download/v${VERSION}/thirdparty-linux.tar.xz|" \
-            -e "s|^RUN aria2c -x10 https://github.com/.*/releases/download/v.*/thirdparty-linux\.tar\.xz$|RUN aria2c -x10 https://github.com/AariyJP/KonomiTVF/releases/download/v${VERSION}/thirdparty-linux.tar.xz|" \
+            -e "s|^# RUN aria2c -x10 https://github.com/.*/releases/download/v.*/thirdparty-linux\.tar\.xz$|RUN aria2c -x10 https://github.com/ajpx0/KonomiTVF/releases/download/v${VERSION}/thirdparty-linux.tar.xz|" \
+            -e "s|^RUN aria2c -x10 https://github.com/.*/releases/download/v.*/thirdparty-linux\.tar\.xz$|RUN aria2c -x10 https://github.com/ajpx0/KonomiTVF/releases/download/v${VERSION}/thirdparty-linux.tar.xz|" \
             -e "s|^# RUN tar xvf thirdparty-linux\.tar\.xz$|RUN tar xvf thirdparty-linux.tar.xz|" \
             -e "s|^RUN aria2c -x10 https://nightly\.link/|# RUN aria2c -x10 https://nightly.link/|" \
             -e "s|^RUN unzip thirdparty-linux\.tar\.xz\.zip|# RUN unzip thirdparty-linux.tar.xz.zip|" \
             Dockerfile
-          grep -q "^RUN aria2c -x10 https://github.com/AariyJP/KonomiTVF/releases/download/v${VERSION}/thirdparty-linux\.tar\.xz$" Dockerfile
+          grep -q "^RUN aria2c -x10 https://github.com/ajpx0/KonomiTVF/releases/download/v${VERSION}/thirdparty-linux\.tar\.xz$" Dockerfile
 
           # uv.lock に記録されているプロジェクトのバージョンを更新
           ## 依存パッケージのバージョンは変更せず、pyproject.toml のバージョンの変更だけを反映する
