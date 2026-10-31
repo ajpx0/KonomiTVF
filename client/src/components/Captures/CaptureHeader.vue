@@ -415,21 +415,8 @@ const clearFilters = () => {
     emit('update:filter', next);
 };
 
-// キーボードショートカットの一覧 (視聴画面と同じく、／(？) キーでも開く)
+// キーボードショートカットの一覧 (／(？) キーで開く処理は CaptureShortcutDialog.vue が行う)
 const isShortcutDialogOpen = ref(false);
-const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key !== '/' && event.key !== '?') {
-        return;
-    }
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
-        return;
-    }
-    if (event.ctrlKey || event.metaKey || event.altKey) {
-        return;
-    }
-    event.preventDefault();
-    isShortcutDialogOpen.value = true;
-};
 
 // 手元の画像のアップロード (メタデータのない画像でも、ファイルの更新日時を撮影日時として扱う)
 // メニューから選んだファイルと、画面にドロップしたファイルの両方をここで送る
@@ -532,7 +519,6 @@ onMounted(() => {
     window.addEventListener('dragover', onDragOver);
     window.addEventListener('dragleave', onDragLeave);
     window.addEventListener('drop', onDrop);
-    window.addEventListener('keydown', onKeyDown);
 });
 onBeforeUnmount(() => {
     if (scanTimer !== null) {
@@ -542,7 +528,6 @@ onBeforeUnmount(() => {
     window.removeEventListener('dragover', onDragOver);
     window.removeEventListener('dragleave', onDragLeave);
     window.removeEventListener('drop', onDrop);
-    window.removeEventListener('keydown', onKeyDown);
 });
 
 </script>

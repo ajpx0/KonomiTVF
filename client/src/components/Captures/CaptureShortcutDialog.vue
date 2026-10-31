@@ -40,6 +40,8 @@
 </template>
 <script lang="ts" setup>
 
+import { onBeforeUnmount, onMounted } from 'vue';
+
 import Utils from '@/utils';
 
 
@@ -62,6 +64,23 @@ defineProps<{
 const emit = defineEmits<{
     (event: 'update:show', show: boolean): void;
 }>();
+
+// キャプチャの一覧のどの画面でも、視聴画面と同じく ／(？) キーで一覧を開く
+const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== '/' && event.key !== '?') {
+        return;
+    }
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+        return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+    }
+    event.preventDefault();
+    emit('update:show', true);
+};
+onMounted(() => window.addEventListener('keydown', onKeyDown));
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown));
 
 const ARROW_KEYS: IShortcutKey = {name: 'fluent:arrow-move-20-regular', icon: true};
 const LEFT_KEY: IShortcutKey = {name: 'fluent:arrow-left-12-filled', icon: true};

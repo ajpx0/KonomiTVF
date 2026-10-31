@@ -5,7 +5,7 @@
         { name: '番組別', path: '/captures/programs/' },
         { name: program ? program.title : '番組', path: route.fullPath, disabled: true },
     ]">
-        <div class="capture-program">
+        <div ref="rootRef" class="capture-program">
             <!-- 番組名から並べ替えまでの見出しの部分 (スマホの縦画面ではマイリストの見出しと同じく左右に 8px を加える) -->
             <div class="capture-program__intro">
                 <!-- 戻るボタンと同じ行には番組名だけを置く -->
@@ -56,7 +56,8 @@
                 <div v-for="capture in captures" :key="capture.id" class="capture-program__item">
                     <div class="capture-program__tile">
                         <CaptureTile :capture="capture" :show-position="order === 'PlaybackPosition'"
-                            :selected="selection.isSelected(capture)" :previewed="selection.isPreviewed(capture)" :selecting="selection.isSelecting.value"
+                            :selected="selection.isSelected(capture)" :cursor="selection.isCursor(capture)" :previewed="selection.isPreviewed(capture)"
+                            :selecting="selection.isSelecting.value"
                             @open="openedCapture = capture"
                             @toggle="(shiftKey) => selection.toggle(capture, shiftKey ? captures : null)"
                             @updated="onUpdated([$event])" />
@@ -67,9 +68,10 @@
             </div>
         </div>
 
-        <CaptureSelectionBar :selection="selection" @updated="onUpdated" @deleted="onDeleted" />
-        <CaptureLightbox :capture="openedCapture" :program-hint="program" :navigate="navigate"
-            @update:capture="openedCapture = $event" @updated="onUpdated([$event])" @deleted="onDeleted" />
+        <CaptureShortcutDialog v-model:show="isShortcutDialogOpen" />
+        <CaptureSelectionBar ref="selectionBarRef" :selection="selection" @updated="onUpdated" @deleted="onDeleted" />
+        <CaptureLightbox :capture="openedCapture" :program-hint="program" :navigate="navigate" :reveal="reveal"
+            @update:capture="onLightboxCaptureChange" @updated="onUpdated([$event])" @deleted="onDeleted" />
     </CapturePage>
 </template>
 <script lang="ts" setup>
@@ -77,11 +79,13 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 
+import { CaptureKeyboardDirection, useCaptureKeyboard } from '@/components/Captures/CaptureKeyboard';
 import CaptureLightbox from '@/components/Captures/CaptureLightbox.vue';
 import CapturePage from '@/components/Captures/CapturePage.vue';
 import CaptureProgramInfo from '@/components/Captures/CaptureProgramInfo.vue';
 import { useCaptureRangePreview, useCaptureSelection } from '@/components/Captures/CaptureSelection';
 import CaptureSelectionBar from '@/components/Captures/CaptureSelectionBar.vue';
+import CaptureShortcutDialog from '@/components/Captures/CaptureShortcutDialog.vue';
 import CaptureTile from '@/components/Captures/CaptureTile.vue';
 import Captures, { CaptureSortOrder, ICapture, ICaptureFilter, ICaptureProgram } from '@/services/Captures';
 import Videos from '@/services/Videos';
@@ -202,6 +206,77 @@ const navigate = async (capture: ICapture, delta: 1 | -1) => {
     const index = captures.value.findIndex(item => item.id === capture.id);
     return captures.value[index + delta] ?? null;
 };
+// 拡大表示を閉じるときに、閉じた先のタイルが画面に見える位置までスクロールさせる (タイルへ縮んでいくアニメーションの行き先にするため)
+const rootRef = ref<HTMLElement | null>(null);
+const findTile = (capture: ICapture) => rootRef.value?.querySelector<HTMLElement>(`.capture-tile[data-capture-id="${capture.id}"]`) ?? null;
+const reveal = async (capture: ICapture) => {
+    findTile(capture)?.scrollIntoView({ block: 'nearest' });
+};
+
+// 拡大表示で前後へ送ったときは、表示していた1枚だけを選んでいる状態なら、タイムラインと同じく選択も送った先へ移す
+const onLightboxCaptureChange = (capture: ICapture | null) => {
+    const shown = openedCapture.value;
+    if (capture !== null && shown !== null && selection.count.value === 1 && selection.isSelected(shown)) {
+        selection.selectOnly(capture);
+    }
+    openedCapture.value = capture;
+};
+
+// キーボードショートカットの一覧 (／(？) キーで開く)
+const isShortcutDialogOpen = ref(false);
+
+// タイムラインと同じキーボード操作
+// 上下の矢印キーでは、画面に並んでいるタイルの位置から、すぐ上か下の行で左右の位置が最も近いタイルへ移る
+// 選んだタイルは縮めて表示しているので、位置は縮める前のレイアウトの位置 (グリッドの項目の offsetTop・offsetLeft) で比べる
+const selectionBarRef = ref<InstanceType<typeof CaptureSelectionBar> | null>(null);
+const getKeyboardTarget = async (capture: ICapture, direction: CaptureKeyboardDirection) => {
+    const index = captures.value.findIndex(item => item.id === capture.id);
+    if (index === -1) {
+        return null;
+    }
+    if (direction === 'Left' || direction === 'Right') {
+        return captures.value[index + (direction === 'Right' ? 1 : -1)] ?? null;
+    }
+    const findItem = (target: ICapture) => findTile(target)?.closest<HTMLElement>('.capture-program__item') ?? null;
+    const current = findItem(capture);
+    if (current === null) {
+        return null;
+    }
+    const step = direction === 'Down' ? 1 : -1;
+    let rowTop: number | null = null;
+    let best: { capture: ICapture; distance: number } | null = null;
+    for (let i = index + step; i >= 0 && i < captures.value.length; i += step) {
+        const item = findItem(captures.value[i]);
+        if (item === null || item.offsetTop === current.offsetTop) {
+            continue;
+        }
+        // 最初に見つかった別の行だけを対象にする
+        if (rowTop === null) {
+            rowTop = item.offsetTop;
+        } else if (item.offsetTop !== rowTop) {
+            break;
+        }
+        const distance = Math.abs(item.offsetLeft - current.offsetLeft);
+        if (best === null || distance < best.distance) {
+            best = { capture: captures.value[i], distance };
+        }
+    }
+    return best?.capture ?? null;
+};
+useCaptureKeyboard({
+    selection,
+    selectionBar: selectionBarRef,
+    isLightboxOpen: () => openedCapture.value !== null,
+    open: (capture) => {
+        openedCapture.value = capture;
+    },
+    getTarget: getKeyboardTarget,
+    getOrdered: () => captures.value,
+    reveal,
+    // 番組別の一覧は1つの放送回のキャプチャだけなので、全選択はこの一覧のキャプチャすべてにする
+    getSelectAllTargets: () => captures.value,
+});
+
 // 削除したキャプチャは、取り直しを待たずに一覧から外す (取り直しの間に1枚表示が削除したキャプチャを隣として拾わないため)
 const onDeleted = (deletedIds: number[]) => {
     const ids = new Set(deletedIds);
