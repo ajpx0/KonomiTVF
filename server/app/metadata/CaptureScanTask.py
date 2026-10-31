@@ -6,6 +6,7 @@ import io
 import os
 import re
 import struct
+from array import array
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -136,28 +137,32 @@ class CaptureImageInfo:
 
 class CaptureFileSnapshot(TypedDict):
     """
-    走査を始めた時点の、キャプチャの場所の情報
+    一括スキャンで照合に使う、キャプチャの場所の情報
     """
 
     id: int
     file_path: str
-    file_name: str
     file_size: int
     file_created_at: datetime
     file_modified_at: datetime
-    capture_id: int | None
     status: Literal['Available', 'Missing', 'Invalid']
-    missing_since: datetime | None
 
 
 @dataclass(slots=True)
 class CaptureRootScanResult:
     """
     保存先ごとの走査の結果 (全保存先の移動の照合が終わってから、消えたファイルを確定するために使う)
+    登録済みの場所は百万件を超えることがあるため、行の内容は保持せず、場所の ID で引ける配列に走査を始めた時点の状態と見つかったかどうかだけを記録する
     """
 
-    unseen: dict[str, CaptureFileSnapshot]
+    root: str
     started_at: datetime
+    # 走査を始めた時点で、この保存先に登録済みだった場所の最大の ID (これより後に登録された場所は、消えたファイルの確定の対象にしない)
+    max_file_id: int
+    # 場所の ID ごとの、走査を始めた時点のサイズ・作成日時・更新日時のハッシュ値 (走査のあとで行が変わったかどうかの判定に使う)
+    file_state_hashes: array[int]
+    # 走査で見つかった場所の ID に 1 を記録する
+    seen_file_ids: bytearray
     original_count: int  # 走査を始めた時点で Missing でなかった場所の数
     found_count: int  # 走査で見つかった画像の数
     is_complete: bool
@@ -320,11 +325,8 @@ class CaptureScanTask:
     # 一括スキャンで1度に一覧から取り出して処理するファイルの数
     SCAN_CHUNK_SIZE: ClassVar[int] = 2000
 
-    # 一括スキャンの開始時に、登録済みの場所を DB から1度に取得する行数
+    # 一括スキャンで、登録済みの場所を DB から1度に取得する行数
     SNAPSHOT_PAGE_SIZE: ClassVar[int] = 2000
-
-    # 大文字と小文字だけが異なるパスを、1つのトランザクションで付け替える行数
-    PATH_UPDATE_BATCH_SIZE: ClassVar[int] = 100
 
     # キャプチャとして扱う画像の拡張子
     CAPTURE_EXTENSIONS: ClassVar[tuple[str, ...]] = ('.jpg', '.jpeg', '.png')
@@ -741,11 +743,16 @@ class CaptureScanTask:
                 for result in results:
                     if result.is_complete is False:
                         can_delete_expired = False
+
+                    # 走査で見つからなかった場所の数と、そのうち新しく見つからなくなった場所の数を数える
+                    unseen_count = 0
                     newly_missing_count = 0
-                    for snapshot in result.unseen.values():
+                    async for snapshot in self.iterateUnseenFiles(result):
+                        unseen_count += 1
                         if snapshot['status'] != 'Missing':
                             newly_missing_count += 1
-                    if result.found_count == 0 and len(result.unseen) > 0:
+
+                    if result.found_count == 0 and unseen_count > 0:
                         can_delete_expired = False
                     if result.original_count > 0 and newly_missing_count / result.original_count > 0.2:
                         can_delete_expired = False
@@ -783,6 +790,8 @@ class CaptureScanTask:
         """
         保存先を1つ、フォルダ単位で走査する
         新しく見つかったパスは、消えたパスとファイル名・サイズ・更新日時が一致すれば移動として扱い、それ以外は登録する
+        登録済みの場所は、一覧から取り出した塊ごとにパスで DB から取得し、走査を始めた時点の状態と見つかったかどうかだけを場所の ID ごとに記録する
+        百万件規模の保存先でも、登録済みの場所を Python のオブジェクトとしてまとめて保持せずに走査できる
 
         Args:
             root (str): 正規化した保存先
@@ -793,42 +802,45 @@ class CaptureScanTask:
 
         scan_started_at = datetime.now(JST)
 
-        # 走査でまだ見つかっていない場所 (走査が終わった時点で残っているものが、消えたファイルの候補になる)
-        ## Windows で大文字と小文字だけが異なるパスも同じファイルとして照合するため、CapturePathKey() のキーで引く
-        unseen: dict[str, CaptureFileSnapshot] = {}
-        # 移動の照合に使う、ファイル名・サイズ・更新日時から登録済みのパスを引く辞書
-        paths_by_signature: dict[tuple[str, int, datetime], list[str]] = {}
+        # 保存先がドライブのルート (F:\ や /) のときも区切りが二重にならないよう、末尾の区切りを os.path.join() で1つにそろえる
+        root_prefix = os.path.join(root, '')
+
+        # 走査を始めた時点で、この保存先に登録済みの場所の最大の ID を取得する
+        ## 走査の途中でアップロードや監視が登録した場所は、これより大きな ID になるので、消えたファイルの確定の対象から外れる
+        max_file_id = 0
+        max_file_ids = await CaptureFile.filter(file_path__startswith=root_prefix).order_by('-id').limit(1).values_list('id', flat=True)
+        if len(max_file_ids) > 0:
+            max_file_id = cast(int, max_file_ids[0])
+
+        # 場所の ID ごとに、走査を始めた時点の状態のハッシュ値 (1件8バイト) と、見つかったかどうか (1件1バイト) を記録する配列
+        ## 百万件でも合わせて約 9MB に収まる
+        file_state_hashes = array('q', [0]) * (max_file_id + 1)
+        seen_file_ids = bytearray(max_file_id + 1)
+
         # 消えたファイルの割合は、すでに Missing の場所を除いて数える
         original_count = 0
 
-        # この保存先に登録済みの場所を、ID の順に一定の件数ずつ取得する (メモリを抑えるため、照合に使う列だけを取得する)
-        ## Tortoise ORM は取得した行を辞書に変換する処理をイベントループ上で実行するため、百万件を一度に取得すると、
-        ## 変換が終わるまでのあいだ (十数秒以上) ほかのすべての API が応答しなくなる
-        ## 保存先がドライブのルート (F:\ や /) のときも区切りが二重にならないよう、末尾の区切りを os.path.join() で1つにそろえる
+        # この保存先に登録済みの場所を、ID の順に一定の件数ずつ取得して、状態のハッシュ値を記録する
+        ## Tortoise ORM は取得した行を変換する処理をイベントループ上で実行するため、一度に取得するとその間ほかのすべての API が応答しなくなる
         last_id = 0
         while True:
             rows = await CaptureFile.filter(
-                file_path__startswith = os.path.join(root, ''),
+                file_path__startswith = root_prefix,
                 id__gt = last_id,
-            ).order_by('id').limit(self.SNAPSHOT_PAGE_SIZE).values(
+                id__lte = max_file_id,
+            ).order_by('id').limit(self.SNAPSHOT_PAGE_SIZE).values_list(
                 'id',
-                'file_path',
-                'file_name',
                 'file_size',
                 'file_created_at',
                 'file_modified_at',
-                'capture_id',
                 'status',
-                'missing_since',
             )
             if len(rows) == 0:
                 break
-            last_id = rows[-1]['id']
-            for snapshot in cast(list[CaptureFileSnapshot], rows):
-                unseen[CapturePathKey(snapshot['file_path'])] = snapshot
-                signature = (snapshot['file_name'], snapshot['file_size'], snapshot['file_modified_at'])
-                paths_by_signature.setdefault(signature, []).append(snapshot['file_path'])
-                if snapshot['status'] != 'Missing':
+            last_id = rows[-1][0]
+            for file_id, file_size, file_created_at, file_modified_at, file_status in rows:
+                file_state_hashes[file_id] = hash((file_size, file_created_at, file_modified_at))
+                if file_status != 'Missing':
                     original_count += 1
 
         found_count = 0
@@ -852,25 +864,22 @@ class CaptureScanTask:
 
             file_name = Path(path).name
 
-            # 同じ保存先の中で、ファイル名・サイズ・更新日時が同じで、まだ見つかっていない場所を候補にする
-            candidate_ids: dict[str, int] = {}
-            for candidate_path in paths_by_signature.get((file_name, size, modified_at), []):
-                candidate = unseen.get(CapturePathKey(candidate_path))
-                if candidate is not None:
-                    candidate_ids[candidate_path] = candidate['id']
+            # すべての保存先から、ファイル名・サイズ・更新日時が同じ場所を候補として DB から探す
+            ## capture_files_name_size_modified_at のインデックスで引けるので、新しく見つかったパスごとに問い合わせても軽い
+            candidate_rows = await CaptureFile.filter(
+                file_name = file_name,
+                file_size = size,
+                file_modified_at = modified_at,
+            ).values('id', 'file_path')
 
-            # 同じ保存先に候補がなければ、保存先をまたぐ移動の候補を DB から探す
-            if len(candidate_ids) == 0:
-                candidate_rows = await CaptureFile.filter(
-                    file_name = file_name,
-                    file_size = size,
-                    file_modified_at = modified_at,
-                ).values('id', 'file_path')
-                for candidate_row in candidate_rows:
-                    candidate_ids[candidate_row['file_path']] = candidate_row['id']
-
-            for old_path, old_id in candidate_ids.items():
+            for candidate_row in candidate_rows:
+                old_id: int = candidate_row['id']
+                old_path: str = candidate_row['file_path']
                 if CapturePathKey(old_path) == CapturePathKey(path):
+                    continue
+
+                # この走査ですでに見つかった場所は、古いパスにファイルがあるので候補から外す
+                if old_id <= max_file_id and seen_file_ids[old_id] == 1:
                     continue
 
                 # 古いパスと新しいパスの両方のロックを、パスの順に取る (取る順を揃えてデッドロックを避ける)
@@ -916,7 +925,9 @@ class CaptureScanTask:
                                 status = moved_status,
                                 missing_since = None,
                             )
-                            unseen.pop(CapturePathKey(old_path), None)
+                            # 付け替えた場所は、消えたファイルの候補から外す
+                            if old_id <= max_file_id:
+                                seen_file_ids[old_id] = 1
                             is_moved = True
 
                     if is_moved is True:
@@ -947,34 +958,42 @@ class CaptureScanTask:
             for chunk_end in range(len(files), 0, -self.SCAN_CHUNK_SIZE):
                 chunk = files[max(0, chunk_end - self.SCAN_CHUNK_SIZE):chunk_end]
 
-                # 変更はないが、大文字と小文字だけが異なるパスで登録されている場所の ID と実際のパス (塊ごとにまとめて付け替える)
-                case_changed_files: list[tuple[int, str]] = []
+                # この塊のパスで登録済みの場所を、まとめて DB から取得する (file_path の UNIQUE 制約のインデックスで引ける)
+                chunk_paths: list[str] = []
+                for entry in chunk:
+                    chunk_paths.append(entry[0])
+                known_rows = await CaptureFile.filter(file_path__in=chunk_paths).values(
+                    'id',
+                    'file_path',
+                    'file_size',
+                    'file_created_at',
+                    'file_modified_at',
+                    'status',
+                )
+                known_files: dict[str, CaptureFileSnapshot] = {}
+                for known_row in cast(list[CaptureFileSnapshot], known_rows):
+                    known_files[known_row['file_path']] = known_row
 
                 async def Process(entry: tuple[str, int, datetime, datetime]) -> None:
                     nonlocal is_complete
                     path, size, created_at, modified_at = entry
-                    key = CapturePathKey(path)
                     try:
-                        # 2回目以降の走査では、一覧の stat の情報だけで変更のないファイルを飛ばす
-                        known = unseen.get(key)
+                        known = known_files.get(path)
                         if known is not None:
+
+                            # 走査を始めた時点で登録済みだった場所は、見つかったことを記録して、消えたファイルの候補から外す
+                            if known['id'] <= max_file_id:
+                                seen_file_ids[known['id']] = 1
+
+                            # 2回目以降の走査では、一覧の stat の情報だけで変更のないファイルを飛ばす
                             is_unchanged = (
                                 known['file_size'] == size and
                                 known['file_created_at'] == created_at and
                                 known['file_modified_at'] == modified_at and
                                 known['status'] != 'Missing'
                             )
-
-                            # Windows で大文字と小文字だけが異なるパスで登録されている場所は、DB のパスを実際の表記に付け替える
-                            ## 以前の版が小文字にそろえて登録した場所や、名前の大文字と小文字だけを変更したファイルが該当する
-                            ## 変更のないファイルは塊の処理を終えてからまとめて付け替え、変更のあるファイルは登録し直す前に付け替える
-                            is_case_changed = known['file_path'] != path
                             if is_unchanged is True:
-                                if is_case_changed is True:
-                                    case_changed_files.append((known['id'], path))
                                 return
-                            if is_case_changed is True:
-                                await CaptureFile.filter(id=known['id']).update(file_path=path, file_name=Path(path).name)
 
                         # 新しく見つかったパスは、まず別の場所からの移動かを照合する
                         else:
@@ -992,7 +1011,6 @@ class CaptureScanTask:
                         logging.warning(f'Cannot inspect capture: {path}', exc_info=ex)
 
                     finally:
-                        unseen.pop(key, None)
                         self.batch_scan_status.processed_count += 1
                         self.batch_scan_status.total_count = max(
                             self.batch_scan_status.total_count,
@@ -1005,26 +1023,12 @@ class CaptureScanTask:
                     entries = chunk[offset:offset + self.NETWORK_DRIVE_CONCURRENCY]
                     await asyncio.gather(*(Process(entry) for entry in entries))
 
-                # 大文字と小文字だけが異なる場所を、一定の件数ずつ1つのトランザクションにまとめて付け替える
-                ## 以前の版で登録した Windows の環境では、更新後の最初の走査で登録済みのすべての場所が該当するため、1件ずつコミットしない
-                ## SQLite の接続は API のクエリと共有しているため、1つのトランザクションを大きくすると、その間 API のクエリが待たされる
-                if len(case_changed_files) > 0:
-                    try:
-                        for offset in range(0, len(case_changed_files), self.PATH_UPDATE_BATCH_SIZE):
-                            async with InWriteTransaction():
-                                for file_id, path in case_changed_files[offset:offset + self.PATH_UPDATE_BATCH_SIZE]:
-                                    # 走査の途中で監視やアップロードが実際の表記のパスを登録していた場合は、付け替えずに残す
-                                    try:
-                                        await CaptureFile.filter(id=file_id).update(file_path=path, file_name=Path(path).name)
-                                    except IntegrityError as ex:
-                                        logging.warning(f'Cannot update capture path: {path}', exc_info=ex)
-                    except OperationalError as ex:
-                        is_complete = False
-                        logging.warning(f'Cannot update capture paths in {folder}', exc_info=ex)
-
         return CaptureRootScanResult(
-            unseen = unseen,
+            root = root,
             started_at = scan_started_at,
+            max_file_id = max_file_id,
+            file_state_hashes = file_state_hashes,
+            seen_file_ids = seen_file_ids,
             original_count = original_count,
             found_count = found_count,
             is_complete = is_complete,
@@ -1048,7 +1052,7 @@ class CaptureScanTask:
             return False
 
         scan_started_at = result.started_at
-        for snapshot in result.unseen.values():
+        async for snapshot in self.iterateUnseenFiles(result):
             path = snapshot['file_path']
             async with self.getPathLock(path):
 
@@ -1067,12 +1071,8 @@ class CaptureScanTask:
                     current_file = await CaptureFile.get_or_none(id=snapshot['id'], file_path=path)
                     if current_file is None:
                         continue
-                    is_changed = (
-                        current_file.file_size != snapshot['file_size'] or
-                        current_file.file_created_at != snapshot['file_created_at'] or
-                        current_file.file_modified_at != snapshot['file_modified_at']
-                    )
-                    if is_changed is True:
+                    current_state_hash = hash((current_file.file_size, current_file.file_created_at, current_file.file_modified_at))
+                    if current_state_hash != result.file_state_hashes[current_file.id]:
                         continue
                     capture = None
                     if current_file.capture_id is not None:
@@ -1093,6 +1093,41 @@ class CaptureScanTask:
                 self.invalidateSections()
 
         return True
+
+
+    async def iterateUnseenFiles(self, result: CaptureRootScanResult) -> AsyncGenerator[CaptureFileSnapshot]:
+        """
+        走査を始めた時点で保存先に登録済みだった場所のうち、走査で見つからなかった場所を ID の順に返す
+        一定の件数ずつ DB から取得し直すため、百万件規模の保存先でもまとめて保持しない
+
+        Args:
+            result (CaptureRootScanResult): 走査と移動の照合を終えた保存先の情報
+
+        Yields:
+            CaptureFileSnapshot: 走査で見つからなかった場所
+        """
+
+        # 保存先のパスで絞り込むので、走査のあとで別の保存先へ付け替えられた場所は対象から外れる
+        last_id = 0
+        while True:
+            rows = await CaptureFile.filter(
+                file_path__startswith = os.path.join(result.root, ''),
+                id__gt = last_id,
+                id__lte = result.max_file_id,
+            ).order_by('id').limit(self.SNAPSHOT_PAGE_SIZE).values(
+                'id',
+                'file_path',
+                'file_size',
+                'file_created_at',
+                'file_modified_at',
+                'status',
+            )
+            if len(rows) == 0:
+                break
+            last_id = rows[-1]['id']
+            for snapshot in cast(list[CaptureFileSnapshot], rows):
+                if result.seen_file_ids[snapshot['id']] == 0:
+                    yield snapshot
 
 
     @classmethod

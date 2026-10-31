@@ -1,14 +1,16 @@
 """キャプチャの保存先フォルダのスキャン処理に関連する E2E テスト。"""
 
 import asyncio
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 import httpx2 as httpx
 import pytest
 
-from app.metadata.CaptureScanTask import CaptureScanTask
-from tests.conftest import FIXTURES_DIR
+from app.metadata.CaptureScanTask import CaptureScanTask, NormalizeCapturePath
+from app.models.Capture import CaptureFile
+from tests.conftest import FIXTURES_DIR, TEMP_DIR
 
 
 async def WaitUntil(condition: Callable[[], bool], timeout: float = 30.0) -> None:
@@ -27,6 +29,64 @@ async def WaitUntil(condition: Callable[[], bool], timeout: float = 30.0) -> Non
 # 複合 E2E テスト
 # 複数の API や保存先のファイル操作が絡むフローのテスト
 # =====================================================================================
+
+# -------------------------------------------------------------------------------------
+# 保存先の一括スキャンで、移動した画像の場所を付け替え、消えた画像を Missing にするフロー
+# (保存先の画像の移動・削除 → CaptureScanTask.runBatchScan()) - 正常系
+# -------------------------------------------------------------------------------------
+
+
+async def test_batch_scan__relinks_moved_file_and_marks_removed_file_missing(client: httpx.AsyncClient, admin_headers: dict[str, str]) -> None:
+    """
+    一括スキャンで、保存先の中で別のフォルダへ移した画像は同じ場所の行のまま新しいパスに付け替わり、
+    消えた画像の行は Missing になり、同じ場所に戻すと同じ行のまま利用できる状態に戻る
+    """
+
+    # 監視している保存先とは別のフォルダに画像を置き、監視の通知を通さずに一括スキャンだけで登録する
+    ## 起動時の一括スキャンや、ほかのテストの削除で始まった一括スキャンが終わるのを待ってから始める
+    root = TEMP_DIR / 'batch-scan'
+    root.mkdir()
+    moved_name = 'Capture_20221003-224010.jpg'
+    removed_name = 'Capture_20221219-001337.jpg'
+    for file_name in (moved_name, removed_name):
+        shutil.copyfile(FIXTURES_DIR / 'captures' / file_name, root / file_name)
+    scanner = CaptureScanTask()
+    await WaitUntil(lambda: scanner.scan_lock.locked() is False)
+    assert await scanner.runBatchScan([str(root)]) is True
+    moved_file = await CaptureFile.get(file_path=NormalizeCapturePath(root / moved_name))
+    removed_file = await CaptureFile.get(file_path=NormalizeCapturePath(root / removed_name))
+    assert moved_file.status == 'Available'
+    assert removed_file.status == 'Available'
+
+    # 1枚を子フォルダへ移し、もう1枚を消してから一括スキャンする
+    (root / 'moved').mkdir()
+    (root / moved_name).rename(root / 'moved' / moved_name)
+    removed_data = (root / removed_name).read_bytes()
+    (root / removed_name).unlink()
+    assert await scanner.runBatchScan([str(root)]) is True
+
+    # 移した画像は、同じ行のまま新しいパスに付け替わる
+    relinked_file = await CaptureFile.get(id=moved_file.id)
+    assert relinked_file.file_path == NormalizeCapturePath(root / 'moved' / moved_name)
+    assert relinked_file.status == 'Available'
+    assert relinked_file.capture_id == moved_file.capture_id
+
+    # 消えた画像の行は、すぐには削除されずに Missing になる
+    missing_file = await CaptureFile.get(id=removed_file.id)
+    assert missing_file.status == 'Missing'
+    assert missing_file.missing_since is not None
+
+    # 同じ場所に戻すと、同じ行のまま利用できる状態に戻る
+    (root / removed_name).write_bytes(removed_data)
+    assert await scanner.runBatchScan([str(root)]) is True
+    restored_file = await CaptureFile.get(id=removed_file.id)
+    assert restored_file.status == 'Available'
+    assert restored_file.missing_since is None
+
+    # ほかのテストの一覧に混ざらないよう、登録したキャプチャを削除する
+    response = await client.request('DELETE', '/api/captures', json={'capture_ids': [moved_file.capture_id, removed_file.capture_id]}, headers=admin_headers)
+    assert response.status_code == 200, response.text
+
 
 # -------------------------------------------------------------------------------------
 # KonomiTV 自身がキャプチャを削除したときと、外で画像が消されたときの監視のフロー
