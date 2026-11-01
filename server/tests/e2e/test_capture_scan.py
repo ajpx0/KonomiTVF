@@ -137,3 +137,50 @@ async def test_delete_capture__does_not_start_batch_scan(
     await WaitUntil(lambda: scan_count >= 1)
     await WaitUntil(lambda: CaptureScanTask().scan_lock.locked() is False)
     assert list(capture_folder.iterdir()) == []
+
+
+# -------------------------------------------------------------------------------------
+# Windows で大文字と小文字だけが異なるパスの場所が2つあるキャプチャを削除するフロー
+# (大文字と小文字を区別しないパスの照合 → DELETE /api/captures) - 正常系
+# -------------------------------------------------------------------------------------
+
+
+async def test_delete_capture__with_paths_differing_only_in_case(
+    client: httpx.AsyncClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Windows のように大文字と小文字を区別しないパスの照合で、同じキーになる場所が2つあるキャプチャも、
+    同じロックを2回待たずに削除できる
+    """
+
+    # Windows と同じく、パスを小文字にしたものを同じファイルかどうかの判定に使う
+    monkeypatch.setattr('app.metadata.CaptureScanTask.CapturePathKey', lambda path: path.lower())
+
+    # アップロードしたキャプチャに、名前の大文字と小文字だけを変えたパスの場所をもう1つ登録する
+    file_name = 'Capture_20260826-044039.jpg'
+    response = await client.post('/api/captures', files={'image': (file_name, (FIXTURES_DIR / 'captures' / file_name).read_bytes(), 'image/jpeg')})
+    assert response.status_code == 201, response.text
+    capture = response.json()
+    uploaded_file = await CaptureFile.get(capture_id=capture['id'])
+    renamed_path = str(Path(uploaded_file.file_path).with_name(file_name.lower()))
+    await CaptureFile.create(
+        capture_id = uploaded_file.capture_id,
+        file_path = renamed_path,
+        file_name = Path(renamed_path).name,
+        file_size = uploaded_file.file_size,
+        file_created_at = uploaded_file.file_created_at,
+        file_modified_at = uploaded_file.file_modified_at,
+        status = 'Available',
+    )
+
+    # 削除の API が応答し、キャプチャと2つの場所の行がどちらも削除される
+    response = await asyncio.wait_for(
+        client.request('DELETE', '/api/captures', json={'capture_ids': [capture['id']]}, headers=admin_headers),
+        timeout = 10,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {'deleted_capture_ids': [capture['id']], 'failed_capture_ids': []}
+    assert await CaptureFile.filter(capture_id=capture['id']).exists() is False
+    await WaitUntil(lambda: CaptureScanTask().scan_lock.locked() is False)

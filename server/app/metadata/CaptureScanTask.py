@@ -1059,10 +1059,26 @@ class CaptureScanTask:
                 # 走査のあとで同じパスに戻ってきていれば、消えていないので何もしない (読めない場合も確定しない)
                 try:
                     await anyio.Path(path).stat()
-                    continue
                 except FileNotFoundError:
                     pass
                 except OSError:
+                    continue
+                else:
+                    # 一覧には出てこないのに、このパスでファイルを開けるのは、Windows で名前の大文字と小文字だけが変わった場合
+                    ## 走査は実際の表記の新しいパスで同じキャプチャの場所を登録しているので、古い表記の場所を削除して、1つのファイルに場所が2つ残らないようにする
+                    ## 同じキーのパスは同じロックなので、新しい表記の場所もこのロックの中で扱える
+                    ## Linux では、ほかの場所のパスが同じキーになることはないので、何も削除しない
+                    if snapshot['status'] != 'Invalid':
+                        async with InWriteTransaction():
+                            current_file = await CaptureFile.get_or_none(id=snapshot['id'], file_path=path)
+                            if current_file is not None and current_file.capture_id is not None:
+                                for other_path in await CaptureFile.filter(
+                                    capture_id = current_file.capture_id,
+                                    id__not = current_file.id,
+                                ).values_list('file_path', flat=True):
+                                    if CapturePathKey(cast(str, other_path)) == CapturePathKey(path):
+                                        await current_file.delete()
+                                        break
                     continue
 
                 async with InWriteTransaction():
@@ -1364,8 +1380,14 @@ class CaptureScanTask:
 
             # 削除の途中で一括スキャンが登録し直さないよう、すべての場所のロックを取る
             ## 移動の照合と同じく、ロックのキーの順に取る (取る順を揃えてデッドロックを避ける)
+            ## Windows で大文字と小文字だけが異なるパスの場所が2つあると、同じロックを2回待って止まってしまうため、同じキーのロックは1回だけ取る
             files.sort(key=lambda file: CapturePathKey(file.file_path))
+            locked_keys: set[str] = set()
             for file in files:
+                key = CapturePathKey(file.file_path)
+                if key in locked_keys:
+                    continue
+                locked_keys.add(key)
                 await stack.enter_async_context(self.getPathLock(file.file_path))
 
             # すべての場所のファイルを削除する
