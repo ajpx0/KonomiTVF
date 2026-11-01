@@ -133,6 +133,14 @@ const totalHeight = computed(() => {
 const domHeight = computed(() => Math.min(totalHeight.value, MAX_DOM_HEIGHT));
 watch(grid, layout);
 
+// 日付から、日付ごとのまとまりの並びの中の位置を引く (範囲選択や、読み込んだ日を手放すときに使う)
+const sectionIndexByDate = computed(() => {
+    const result = new Map<string, number>();
+    sections.value.forEach((section, index) => result.set(section.date, index));
+    return result;
+});
+
+
 // 全体の高さが変わったら (絞り込みや画面の幅の変更)、要素の範囲がタイムラインの外へはみ出さないようにずらす位置を収める
 watch(totalHeight, (height) => {
     baseOffset.value = Math.min(baseOffset.value, Math.max(height - MAX_DOM_HEIGHT, 0));
@@ -472,8 +480,61 @@ const orderedLoaded = () => {
     return result;
 };
 useCaptureRangePreview(props.selection, orderedLoaded);
-const onToggle = (capture: ICapture, shiftKey: boolean) => {
-    props.selection.toggle(capture, shiftKey ? orderedLoaded() : null);
+
+/**
+ * タイルの選択を切り替える (Shift キーを押しているときは、範囲選択の起点からこのキャプチャまでをまとめて選ぶ)
+ * スクラバーで遠くへ移ったあとのように、起点との間に読み込んでいない日があるときは、間の期間のキャプチャを取得してから選ぶ
+ * 日ごとに読み込むと、数か月分の範囲では日の数だけリクエストを送ることになるので、一覧の API の期間の絞り込みとカーソルで、ページ単位にまとめて取得する
+ * @param capture 選択を切り替えるキャプチャ
+ * @param shiftKey Shift キーを押していたかどうか
+ */
+const onToggle = async (capture: ICapture, shiftKey: boolean) => {
+    const anchor = props.selection.anchor.value;
+    if (shiftKey === false || anchor === null) {
+        props.selection.toggle(capture, shiftKey ? orderedLoaded() : null);
+        return;
+    }
+
+    // 起点の日と、このキャプチャの日の並びの中の位置を求める
+    const anchorDate = dateOf(anchor);
+    const captureDate = dateOf(capture);
+    const anchorIndex = anchorDate === null ? undefined : sectionIndexByDate.value.get(anchorDate);
+    const captureIndex = captureDate === null ? undefined : sectionIndexByDate.value.get(captureDate);
+    if (anchorIndex === undefined || captureIndex === undefined) {
+        props.selection.toggle(capture, orderedLoaded());
+        return;
+    }
+
+    // 間の日をすべて読み込んでいれば、読み込んだ日をつないだ並びでそのまま選ぶ
+    const fromIndex = Math.min(anchorIndex, captureIndex);
+    const toIndex = Math.max(anchorIndex, captureIndex);
+    let hasUnloadedDay = false;
+    for (let index = fromIndex; index <= toIndex; index++) {
+        if (loadedDays.value.has(sections.value[index].date) === false) {
+            hasUnloadedDay = true;
+            break;
+        }
+    }
+    if (hasUnloadedDay === false) {
+        props.selection.toggle(capture, orderedLoaded());
+        return;
+    }
+
+    // 読み込んでいない日があれば、起点の日からこのキャプチャの日までの期間のキャプチャを、日の読み込みと同じ並び順で取得する
+    // 日は新しい順に並ぶので、並びの後ろの日が期間の開始日、前の日が終了日になる
+    // 期間は今の絞り込みで表示している日の中にあるので、絞り込みの期間をこの期間で置き換えても、表示中の条件の中から選べる
+    const myGeneration = generation;
+    const result = await Captures.fetchAllCaptures({
+        order: props.axis === 'CapturedAt' ? 'CapturedAtDesc' : 'BroadcastAtDesc',
+        day_start_hour: props.dayStartHour,
+        filter: { ...props.filter, start_date: sections.value[toIndex].date, end_date: sections.value[fromIndex].date },
+    });
+
+    // 取得している間に絞り込みが変わったり、選択を解除・変更したりしたときは、押した時点の範囲を選ばずに終える
+    if (result === null || myGeneration !== generation || props.selection.anchor.value?.id !== anchor.id) {
+        return;
+    }
+    props.selection.toggle(capture, result.captures);
 };
 
 const formatDate = (date: string) => {

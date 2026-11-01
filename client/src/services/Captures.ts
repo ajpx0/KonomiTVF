@@ -309,6 +309,9 @@ class Captures {
         }
         if (options.date) {
             params.date = options.date;
+        }
+        // 日付の境目の時刻は、日付の指定 (date) と期間の絞り込み (start_date・end_date) の両方に使われる
+        if (options.date || options.day_start_hour !== undefined) {
             params.day_start_hour = options.day_start_hour ?? 0;
         }
 
@@ -329,7 +332,7 @@ class Captures {
 
     /**
      * 条件に合うキャプチャを、カーソルをたどって最後まで取得する
-     * 番組の中のキャプチャ (多くても数百件) のように、件数が限られる一覧のためのもの
+     * 番組の中のキャプチャ (多くても数百件) のように件数が限られる一覧や、Shift キーで範囲選択した期間のように、すべてのキャプチャが必要なときのためのもの
      * @param options 並び順・日付・絞り込み
      * @returns キャプチャと、それらが参照する番組 (失敗時は null)
      */

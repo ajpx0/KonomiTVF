@@ -14,8 +14,9 @@ export function useCaptureSelection() {
     // 選択中のキャプチャ (ID → キャプチャ)
     const selected = ref(new Map<number, ICapture>());
 
-    // Shift キーでの範囲選択の起点にする、最後にクリックしたキャプチャの ID
-    const anchorId = ref<number | null>(null);
+    // Shift キーでの範囲選択の起点にする、最後にクリックしたキャプチャ
+    // タイムラインが起点のある日を求めて、起点から範囲の終わりまでの日を読み込めるよう、ID ではなくキャプチャそのものを持つ
+    const anchor = ref<ICapture | null>(null);
 
     // キーボードで移動する起点にする、最後に選んだか矢印キーで移動したキャプチャ
     // Shift キーと矢印キーで範囲を広げている間は、範囲選択の起点は動かさずにこちらだけを動かす (エクスプローラーや Finder と同じ)
@@ -46,15 +47,15 @@ export function useCaptureSelection() {
         const next = new Map(selected.value);
 
         // Shift キーを押しての選択は、起点から今のキャプチャまでをまとめて選ぶ (Google フォトと同じ)
-        if (ordered !== null && anchorId.value !== null) {
-            const from = ordered.findIndex(item => item.id === anchorId.value);
+        if (ordered !== null && anchor.value !== null) {
+            const from = ordered.findIndex(item => item.id === anchor.value?.id);
             const to = ordered.findIndex(item => item.id === capture.id);
             if (from !== -1 && to !== -1) {
                 for (const item of ordered.slice(Math.min(from, to), Math.max(from, to) + 1)) {
                     next.set(item.id, item);
                 }
                 selected.value = next;
-                anchorId.value = capture.id;
+                anchor.value = capture;
                 cursor.value = capture;
                 isCursorVisible.value = false;
                 return;
@@ -67,7 +68,7 @@ export function useCaptureSelection() {
             next.set(capture.id, capture);
         }
         selected.value = next;
-        anchorId.value = capture.id;
+        anchor.value = capture;
         cursor.value = capture;
         isCursorVisible.value = false;
     };
@@ -78,7 +79,7 @@ export function useCaptureSelection() {
      */
     const selectOnly = (capture: ICapture) => {
         selected.value = new Map([[capture.id, capture]]);
-        anchorId.value = capture.id;
+        anchor.value = capture;
         cursor.value = capture;
         isCursorVisible.value = false;
     };
@@ -89,7 +90,7 @@ export function useCaptureSelection() {
      * @param ordered 画面での並び順のキャプチャ
      */
     const selectRange = (capture: ICapture, ordered: ICapture[]) => {
-        const from = ordered.findIndex(item => item.id === anchorId.value);
+        const from = ordered.findIndex(item => item.id === anchor.value?.id);
         const to = ordered.findIndex(item => item.id === capture.id);
         // 起点が並びの中に見つからないときは、移動先から範囲選択を始め直す
         if (from === -1 || to === -1) {
@@ -111,7 +112,7 @@ export function useCaptureSelection() {
      * @param ordered 画面での並び順のキャプチャ
      */
     const previewRange = (capture: ICapture | null, ordered: ICapture[]) => {
-        const from = ordered.findIndex(item => item.id === anchorId.value);
+        const from = ordered.findIndex(item => item.id === anchor.value?.id);
         const to = capture === null ? -1 : ordered.findIndex(item => item.id === capture.id);
         if (selected.value.size === 0 || from === -1 || to === -1) {
             if (previewIds.value.size > 0) {
@@ -155,7 +156,7 @@ export function useCaptureSelection() {
             return;
         }
         selected.value = next;
-        anchorId.value = cursor.value.id;
+        anchor.value = cursor.value;
         isCursorVisible.value = true;
     };
 
@@ -203,13 +204,14 @@ export function useCaptureSelection() {
 
     const clear = () => {
         selected.value = new Map();
-        anchorId.value = null;
+        anchor.value = null;
         cursor.value = null;
         isCursorVisible.value = false;
     };
 
     return {
         selected,
+        anchor,
         isSelecting,
         count,
         isSelected,
