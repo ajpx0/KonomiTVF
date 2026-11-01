@@ -232,15 +232,18 @@ async def BuildCaptureWhere(
         params.append(filters.capture_program_id)
 
     # 録画番組で絞り込む (録画番組とは、番組キーが一致する放送回のキャプチャで結び付ける)
+    ## チャンネルでの絞り込みと同じく、録画番組の放送回を先に探し、当てはまった放送回の ID で絞り込む
+    ## キャプチャの行ごとに録画番組と照合すると、百万件規模のキャプチャを全件走査してしまう
     if filters.recorded_program_id is not None:
         conditions.append("""
-            EXISTS (
-                SELECT 1 FROM recorded_programs r
+            c.capture_program_id IN (
+                SELECT p4.id FROM recorded_programs r
+                JOIN capture_programs p4 ON
+                    p4.network_id = r.network_id AND
+                    p4.service_id = r.service_id AND
+                    p4.event_id = r.event_id AND
+                    p4.start_time = r.start_time
                 WHERE r.id = ?
-                    AND r.network_id = p.network_id
-                    AND r.service_id = p.service_id
-                    AND r.event_id = p.event_id
-                    AND r.start_time = p.start_time
             )
         """.strip())
         params.append(filters.recorded_program_id)
