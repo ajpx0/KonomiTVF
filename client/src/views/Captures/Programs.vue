@@ -346,7 +346,10 @@ const onLogoError = (event: Event) => {
         position: relative;
         aspect-ratio: 16 / 9;
         background: rgb(var(--v-theme-background-lighten-2));
+        // 画像は枠いっぱいに重ねて切り抜き、4:3 などのキャプチャでも画像の縦横比で枠が押し広げられず 16:9 のまま表示する
         img {
+            position: absolute;
+            inset: 0;
             display: block;
             width: 100%;
             height: 100%;
