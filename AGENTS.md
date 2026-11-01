@@ -16,7 +16,7 @@
 - サーバーとクライアントの両方を各ユーザーの PC で動かす前提で、Windows サービス・Linux の pm2 サービス・Docker で動作する
 - 動画プレイヤーには DPlayer のフォーク DPlayerF (tsukumijima/DPlayer v1.33.2 ベース) を使う。音量バーの常時表示・拡幅・1% 単位のホイール / 矢印キー操作と、big / small サイズのコメントで基準フォントサイズが変わってしまう問題の修正を含む
   - ソースはトップレベルの `dplayer/` に同梱し、`client/package.json` から `file:../dplayer` で参照する
-  - ビルド成果物の `dplayer/dist/` は Git 管理外。CI と各環境では `dplayer/` で `npm ci` と `npm run build` を実行してから、`client/` の依存関係をインストールする
+  - ビルド成果物の `dplayer/dist/` は Git 管理外。CI と各環境では `dplayer/` で `npm ci` と `npm run build` を実行し、`dplayer/node_modules/` を削除してから `client/` の依存関係をインストールする (file: 参照は node_modules ごとコピーされ、DPlayer の型定義が `dplayer/` 側の古い mpeg2toh264 を参照してしまうため)
 
 ### リポジトリとリリース
 

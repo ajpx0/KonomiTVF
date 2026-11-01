@@ -1,7 +1,13 @@
 const path = require('path');
 const webpack = require('webpack');
 const { GitRevisionPlugin } = require('git-revision-webpack-plugin');
-const gitRevisionPlugin = new GitRevisionPlugin();
+const getGitHash = () => {
+    try {
+        return new GitRevisionPlugin().version();
+    } catch {
+        return 'unknown';
+    }
+};
 const autoprefixer = require('autoprefixer');
 const cssnano = require('cssnano');
 
@@ -164,7 +170,7 @@ module.exports = {
     plugins: [
         new webpack.DefinePlugin({
             DPLAYER_VERSION: `"${require('../package.json').version}"`,
-            GIT_HASH: JSON.stringify(gitRevisionPlugin.version()),
+            GIT_HASH: JSON.stringify(getGitHash()),
         }),
     ],
 };

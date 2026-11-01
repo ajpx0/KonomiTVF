@@ -36,7 +36,9 @@ jobs:
         with:
           node-version: '20.16.0'
           cache: 'yarn'
-          cache-dependency-path: '${{ github.workspace }}/client/yarn.lock'
+          cache-dependency-path: |
+            ${{ github.workspace }}/client/yarn.lock
+            ${{ github.workspace }}/dplayer/package-lock.json
 
       # uv をセットアップ
       ## pyproject.toml のバージョンを更新した後、uv.lock に記録されているプロジェクトのバージョンも更新するために利用する
@@ -92,6 +94,15 @@ jobs:
           ## 依存パッケージのバージョンは変更せず、pyproject.toml のバージョンの変更だけを反映する
           (cd server/ && uv lock)
           (cd installer/ && uv lock)
+
+          # クライアントが file:../dplayer で参照する DPlayer を先にビルド
+          ## dplayer/dist/ は Git 管理外のため、クライアントの依存関係をインストールする前に生成しておく必要がある
+          ## file: 参照の依存関係は node_modules ごとクライアント側にコピーされ、DPlayer の型定義が dplayer/ 側の古い mpeg2toh264 を参照してしまうため、ビルド後に削除する
+          cd dplayer/
+          npm ci
+          npm run build
+          rm -rf node_modules/
+          cd ../
 
           # クライアントをビルド
           cd client/

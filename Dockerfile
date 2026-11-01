@@ -31,6 +31,16 @@ RUN unzip thirdparty-linux.tar.xz.zip && tar xvf thirdparty-linux.tar.xz
 
 FROM node:20.16.0 AS client-builder
 
+# クライアントが file:../dplayer で参照する DPlayer を先にビルド
+## dplayer/dist/ は Git 管理外のため、クライアントの依存パッケージをインストールする前に生成しておく
+WORKDIR /code/dplayer/
+COPY ./dplayer/package.json ./dplayer/package-lock.json /code/dplayer/
+COPY ./dplayer/patches/ /code/dplayer/patches/
+RUN npm ci
+COPY ./dplayer/ /code/dplayer/
+## file: 参照の依存パッケージは node_modules ごとクライアント側にコピーされ、DPlayer の型定義が dplayer/ 側の古い mpeg2toh264 を参照してしまうため、ビルド後に削除する
+RUN npm run build && rm -rf node_modules/
+
 # 依存パッケージリスト (package.json/yarn.lock) だけをコピー
 WORKDIR /code/client/
 COPY ./client/package.json ./client/yarn.lock /code/client/

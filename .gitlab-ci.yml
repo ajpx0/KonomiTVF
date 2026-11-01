@@ -351,6 +351,7 @@ create-release-commit:
       grep -q "^RUN aria2c -x10 ${RELEASE_BASE}/thirdparty-linux\.tar\.xz$" Dockerfile
       (cd server/ && uv lock)
       (cd installer/ && uv lock)
+      (cd dplayer/ && npm ci && npm run build && rm -rf node_modules/)
       (cd client/ && yarn install --frozen-lockfile && yarn build)
       git add -A
       git add -f client/dist/
