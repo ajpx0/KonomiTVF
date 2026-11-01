@@ -585,55 +585,70 @@ async def SerializePrograms(ids: list[int]) -> list[schemas.CaptureProgram]:
     return programs
 
 
-async def GetProgramAlbum(program: schemas.CaptureProgram, user: User | None) -> schemas.CaptureProgramAlbum | None:
+async def GetProgramAlbums(programs: list[schemas.CaptureProgram], user: User | None) -> list[schemas.CaptureProgramAlbum]:
     """
-    放送回のアルバム (利用できるキャプチャの枚数と代表のキャプチャ) を作る
+    放送回ごとのアルバム (利用できるキャプチャの枚数と代表のキャプチャ) を作る
 
     Args:
-        program (schemas.CaptureProgram): 放送回の番組情報
+        programs (list[schemas.CaptureProgram]): 放送回の番組情報 (この並び順でアルバムを返す)
         user (User | None): 閲覧しているユーザー
 
     Returns:
-        schemas.CaptureProgramAlbum | None: 放送回のアルバム (利用できるキャプチャが1枚もない場合は None)
+        list[schemas.CaptureProgramAlbum]: 放送回のアルバム (利用できるキャプチャが1枚もない放送回は含めない)
     """
 
-    conn = connections.get('default')
+    if len(programs) == 0:
+        return []
 
-    # 利用できるキャプチャの枚数を取得する
-    stats_rows = await conn.execute_query_dict(f"""
-        SELECT COUNT(*) AS count
-        FROM captures c
-        WHERE c.capture_program_id = ? AND {CAPTURE_AVAILABLE_CONDITION}
-    """, [program.id])
-    stats = stats_rows[0]
-    if stats['count'] == 0:
-        return None
+    # 放送回ごとに、再生位置のあるキャプチャを先に並べ、再生位置のあるキャプチャの真ん中あたりを代表のキャプチャにする
+    ## 一覧の全部の放送回の枚数と代表のキャプチャを1回のクエリで取得する
+    ## 放送回ごとに問い合わせると、起動時の一括スキャンのように DB の接続を使い続ける処理があるとき、問い合わせのたびに順番を待って一覧が数十秒かかる
+    ## 字幕の文章を含むキャプチャの全部の列を、放送回のすべてのキャプチャの分だけ並べ替えないよう、先に代表のキャプチャの ID だけを選んでから行を読む
+    placeholders = ', '.join('?' for _ in programs)
+    cover_rows = await connections.get('default').execute_query_dict(f"""
+        SELECT c.*, a.album_capture_count
+        FROM (
+            SELECT
+                c.id,
+                ROW_NUMBER() OVER album_order AS album_position,
+                COUNT(*) OVER album AS album_capture_count,
+                COUNT(c.playback_position) OVER album AS album_positioned_count
+            FROM captures c
+            WHERE c.capture_program_id IN ({placeholders}) AND {CAPTURE_AVAILABLE_CONDITION}
+            WINDOW
+                album AS (PARTITION BY c.capture_program_id),
+                album_order AS (
+                    PARTITION BY c.capture_program_id
+                    ORDER BY (c.playback_position IS NULL), c.playback_position, c.captured_at, c.id
+                )
+        ) a
+        JOIN captures c ON c.id = a.id
+        WHERE a.album_position = a.album_positioned_count / 2 + 1
+    """, [program.id for program in programs])
 
-    # 再生位置のあるキャプチャを先に並べ、その真ん中あたりを代表のキャプチャにする
-    positioned_rows = await conn.execute_query_dict(f"""
-        SELECT COUNT(*) AS count
-        FROM captures c
-        WHERE c.capture_program_id = ? AND {CAPTURE_AVAILABLE_CONDITION} AND c.playback_position IS NOT NULL
-    """, [program.id])
-    cover_offset = positioned_rows[0]['count'] // 2
-    cover_rows = await conn.execute_query_dict(f"""
-        SELECT c.*
-        FROM captures c
-        WHERE c.capture_program_id = ? AND {CAPTURE_AVAILABLE_CONDITION}
-        ORDER BY (c.playback_position IS NULL), c.playback_position, c.captured_at, c.id
-        LIMIT 1 OFFSET ?
-    """, [program.id, cover_offset])
+    # 代表のキャプチャを API のレスポンスの形にし、放送回ごとの枚数と一緒に引けるようにする
+    capture_counts: dict[int, int] = {}
+    capture_rows: list[dict[str, Any]] = []
+    for cover_row in cover_rows:
+        capture_counts[cover_row['capture_program_id']] = cover_row.pop('album_capture_count')
+        capture_rows.append(cover_row)
+    covers_by_program_id: dict[int, schemas.Capture] = {}
+    for capture in await SerializeCaptures(capture_rows, user):
+        if capture.capture_program_id is not None:
+            covers_by_program_id[capture.capture_program_id] = capture
 
-    # 枚数を数えてから代表のキャプチャを取得するまでの間に、最後の1枚が削除されたときも、利用できるキャプチャがないものとして扱う
-    if len(cover_rows) == 0:
-        return None
-    cover_capture = (await SerializeCaptures(cover_rows, user))[0]
-
-    return schemas.CaptureProgramAlbum(
-        **program.model_dump(),
-        capture_count = stats['count'],
-        cover_capture = cover_capture,
-    )
+    # 渡された放送回の順にアルバムを作る (利用できるキャプチャが1枚もない放送回は、代表のキャプチャがないので含めない)
+    albums: list[schemas.CaptureProgramAlbum] = []
+    for program in programs:
+        cover_capture = covers_by_program_id.get(program.id)
+        if cover_capture is None:
+            continue
+        albums.append(schemas.CaptureProgramAlbum(
+            **program.model_dump(),
+            capture_count = capture_counts[program.id],
+            cover_capture = cover_capture,
+        ))
+    return albums
 
 
 async def SerializeTag(tag: CaptureTag) -> schemas.CaptureTag:
@@ -1178,14 +1193,10 @@ async def CaptureProgramsAPI(
         next_cursor = EncodeCursor(signature, [rows[limit - 1]['start_time'], rows[limit - 1]['id']])
 
     # 放送回ごとにアルバム (枚数・撮影期間・代表のキャプチャ) を作る
+    ## 一覧を取得してからアルバムを作るまでの間に、キャプチャがすべて削除された放送回は一覧から外れる
     ids = [row['id'] for row in rows[:limit]]
     programs_by_id = {program.id: program for program in await SerializePrograms(ids)}
-    ## 一覧を取得してからアルバムを作るまでの間に、キャプチャがすべて削除された放送回は一覧から外す
-    albums: list[schemas.CaptureProgramAlbum] = []
-    for id in ids:
-        album = await GetProgramAlbum(programs_by_id[id], user)
-        if album is not None:
-            albums.append(album)
+    albums = await GetProgramAlbums([programs_by_id[id] for id in ids], user)
     return schemas.CapturePrograms(programs=albums, next_cursor=next_cursor)
 
 
@@ -1208,16 +1219,13 @@ async def CaptureProgramAPI(
     response.headers['Cache-Control'] = 'private, no-store'
 
     # 放送回がないときと、利用できるキャプチャが1枚もないときは、どちらも見つからないものとして扱う
-    programs = await SerializePrograms([capture_program_id])
-    album = None
-    if len(programs) > 0:
-        album = await GetProgramAlbum(programs[0], user)
-    if album is None:
+    albums = await GetProgramAlbums(await SerializePrograms([capture_program_id]), user)
+    if len(albums) == 0:
         raise HTTPException(
             status_code = status.HTTP_404_NOT_FOUND,
             detail = 'Capture program not found',
         )
-    return album
+    return albums[0]
 
 
 @router.get(
