@@ -12,7 +12,7 @@ import pytest
 
 from app.constants import JST
 from app.metadata.CaptureScanTask import CaptureScanTask, NormalizeCapturePath
-from app.models.Capture import CaptureFile
+from app.models.Capture import Capture, CaptureFile
 from tests.conftest import FIXTURES_DIR, TEMP_DIR
 
 
@@ -246,6 +246,77 @@ async def test_batch_scan__lists_flat_folder_with_small_memory(monkeypatch: pyte
     # すべての画像を期待した順に処理する
     assert processed_count == file_count
     assert out_of_order_paths == []
+
+
+# -------------------------------------------------------------------------------------
+# 設定から外した保存先にあった画像が消えたあとに、すべての保存先を一括スキャンするフロー
+# (設定にないフォルダの画像の削除 → CaptureScanTask.runBatchScan()) - 正常系
+# -------------------------------------------------------------------------------------
+
+
+async def test_batch_scan__confirms_removed_files_outside_capture_folders(client: httpx.AsyncClient, admin_headers: dict[str, str]) -> None:
+    """
+    設定されたどの保存先にも属さない場所 (設定から外した保存先にあった場所) は、すべての保存先の一括スキャンで、
+    ファイルが消えていれば Missing になり、1週間たっても戻らなければキャプチャごと削除され、ファイルがまだあればそのまま残る
+    """
+
+    # 設定された保存先には、普段どおりに画像が見えている状態にする
+    ## 保存先に画像が1枚も見えないときは、マウントが外れている可能性があるため、すべての保存先で期限による削除が見送られる
+    file_name = 'Capture_20260826-044039.jpg'
+    response = await client.post('/api/captures', files={'image': (file_name, (FIXTURES_DIR / 'captures' / file_name).read_bytes(), 'image/jpeg')})
+    assert response.status_code == 201, response.text
+    uploaded_capture = response.json()
+
+    # 設定から外した保存先を再現するため、設定にないフォルダだけを一括スキャンして画像を登録する
+    root = TEMP_DIR / 'removed-folder'
+    root.mkdir()
+    kept_name = 'Capture_20221003-224010.jpg'
+    removed_name = 'Capture_20221219-001337.jpg'
+    for file_name in (kept_name, removed_name):
+        shutil.copyfile(FIXTURES_DIR / 'captures' / file_name, root / file_name)
+    scanner = CaptureScanTask()
+    await WaitUntil(lambda: scanner.scan_lock.locked() is False)
+    assert await scanner.runBatchScan([str(root)]) is True
+    kept_file = await CaptureFile.get(file_path=NormalizeCapturePath(root / kept_name))
+    removed_file = await CaptureFile.get(file_path=NormalizeCapturePath(root / removed_name))
+
+    # 1枚を消してから、設定されたすべての保存先を一括スキャンすると、消えた画像の行は Missing になり、ファイルがまだある画像の行はそのまま残る
+    (root / removed_name).unlink()
+    assert await scanner.runBatchScan() is True
+    missing_file = await CaptureFile.get(id=removed_file.id)
+    assert missing_file.status == 'Missing'
+    assert missing_file.missing_since is not None
+    assert (await CaptureFile.get(id=kept_file.id)).status == 'Available'
+
+    # 1週間たつ前にファイルが同じ場所に戻れば (マウントが遅れたフォルダや、ごみ箱から戻した画像)、次の一括スキャンで利用できる状態に戻る
+    shutil.copyfile(FIXTURES_DIR / 'captures' / removed_name, root / removed_name)
+    shutil.copystat(FIXTURES_DIR / 'captures' / removed_name, root / removed_name)
+    assert await scanner.runBatchScan() is True
+    restored_file = await CaptureFile.get(id=removed_file.id)
+    assert restored_file.status == 'Available'
+    assert restored_file.missing_since is None
+
+    # もう一度消してから一括スキャンすると、また Missing になる
+    (root / removed_name).unlink()
+    assert await scanner.runBatchScan() is True
+    assert (await CaptureFile.get(id=removed_file.id)).status == 'Missing'
+
+    # 見つからなくなってから1週間たったことにして一括スキャンすると、場所が残っていないキャプチャごと削除される
+    await CaptureFile.filter(id=removed_file.id).update(missing_since=datetime.now(JST) - timedelta(days=8))
+    assert await scanner.runBatchScan() is True
+    assert await CaptureFile.filter(id=removed_file.id).exists() is False
+    assert await Capture.filter(id=removed_file.capture_id).exists() is False
+    assert (await CaptureFile.get(id=kept_file.id)).status == 'Available'
+
+    # ほかのテストの一覧に混ざらないよう、残ったキャプチャを削除する
+    response = await client.request(
+        'DELETE',
+        '/api/captures',
+        json = {'capture_ids': [uploaded_capture['id'], kept_file.capture_id]},
+        headers = admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    await WaitUntil(lambda: scanner.scan_lock.locked() is False)
 
 
 # -------------------------------------------------------------------------------------

@@ -30,6 +30,7 @@ from pydantic import (
 from tortoise import connections, transactions
 from tortoise.backends.base.client import BaseDBAsyncClient
 from tortoise.exceptions import IntegrityError, OperationalError
+from tortoise.expressions import Q
 from watchfiles import Change, awatch
 
 from app import logging, schemas
@@ -175,7 +176,10 @@ class CaptureRootScanResult:
     登録済みの場所は百万件を超えることがあるため、行の内容は保持せず、場所の ID で引ける配列に走査を始めた時点の状態と見つかったかどうかだけを記録する
     """
 
-    root: str
+    # 走査した保存先 (None は、設定から外した保存先にあった場所のように、設定されたどの保存先にも属さない場所をまとめて確認した結果)
+    root: str | None
+    # この結果が扱う場所を DB から絞り込む条件
+    file_path_filters: list[Q]
     started_at: datetime
     # 走査を始めた時点で、この保存先に登録済みだった場所の最大の ID (これより後に登録された場所は、消えたファイルの確定の対象にしない)
     max_file_id: int
@@ -816,6 +820,7 @@ class CaptureScanTask:
         - 追加・変更があった画像だけを解析して DB に登録する
         - 別の保存先へ移動した画像は、中身を読まずに場所だけを付け替える
         - 最後まで正常に走査できた保存先だけ、消えたファイルと期限切れの行を確定する
+        - すべての保存先を走査するときは、設定から外した保存先にあった場所も、ファイルが消えていれば同じく確定する
 
         Args:
             folders (list[str] | None): 対象の保存先 (省略時は設定されたすべての保存先)
@@ -863,6 +868,11 @@ class CaptureScanTask:
                 for root in roots:
                     results.append(await self.scanRoot(root))
 
+                # 設定から外した保存先にあった場所のように、どの保存先にも属さない場所は、すべての保存先を走査するときだけ確認する
+                ## 保存先の走査のあとに確認するので、外した保存先からほかの保存先へ移した画像は、先に移動として付け替わっている
+                if is_all_folders is True:
+                    results.append(await self.scanRoot(None))
+
                 # 別の保存先へ移動した画像の照合を全保存先で終えてから、消えたファイルと期限を確定する
                 ## 期限による削除は、すべての保存先を最後まで走査できたときだけ行う
                 ## 読めなかった保存先へ移した画像は移動として照合できていないので、移す前の場所を削除すると、お気に入りやタグごと消えてしまうため
@@ -882,7 +892,9 @@ class CaptureScanTask:
                         if snapshot['status'] != 'Missing':
                             newly_missing_count += 1
 
-                    if result.found_count == 0 and unseen_count > 0:
+                    # どの保存先にも属さない場所は、マウントが外れて空に見える保存先がないので、1枚も見つからなくても削除を見送らない
+                    ## 外した保存先の画像を利用者がすべて消した場合も、1週間後に削除される
+                    if result.root is not None and result.found_count == 0 and unseen_count > 0:
                         can_delete_expired = False
                     if result.original_count > 0 and newly_missing_count / result.original_count > 0.2:
                         can_delete_expired = False
@@ -916,15 +928,17 @@ class CaptureScanTask:
             return is_complete
 
 
-    async def scanRoot(self, root: str) -> CaptureRootScanResult:
+    async def scanRoot(self, root: str | None) -> CaptureRootScanResult:
         """
         保存先を1つ、フォルダ単位で走査する
         新しく見つかったパスは、消えたパスとファイル名・サイズ・更新日時が一致すれば移動として扱い、それ以外は登録する
         登録済みの場所は、一覧から取り出した塊ごとにパスで DB から取得し、走査を始めた時点の状態と見つかったかどうかだけを場所の ID ごとに記録する
         百万件規模の保存先でも、登録済みの場所を Python のオブジェクトとしてまとめて保持せずに走査できる
+        保存先の代わりに None を渡すと、設定から外した保存先にあった場所のように、設定されたどの保存先にも属さない場所を、
+        録画の一括スキャンと同じく、ファイルがまだあるかどうかだけで確認する
 
         Args:
-            root (str): 正規化した保存先
+            root (str | None): 正規化した保存先 (None なら、どの保存先にも属さない場所を確認する)
 
         Returns:
             CaptureRootScanResult: 全保存先の走査のあとで、消えたファイルを確定するための情報
@@ -932,13 +946,20 @@ class CaptureScanTask:
 
         scan_started_at = datetime.now(JST)
 
-        # 保存先がドライブのルート (F:\ や /) のときも区切りが二重にならないよう、末尾の区切りを os.path.join() で1つにそろえる
-        root_prefix = os.path.join(root, '')
+        # この走査で扱う場所を DB から絞り込む条件
+        ## 保存先がドライブのルート (F:\ や /) のときも区切りが二重にならないよう、末尾の区切りを os.path.join() で1つにそろえる
+        ## どの保存先にも属さない場所は、設定されたすべての保存先の外にある場所に絞り込む
+        file_path_filters: list[Q] = []
+        if root is not None:
+            file_path_filters.append(Q(file_path__startswith=os.path.join(root, '')))
+        else:
+            for folder in Config().capture.upload_folders:
+                file_path_filters.append(~Q(file_path__startswith=os.path.join(NormalizeCapturePath(folder), '')))
 
         # 走査を始めた時点で、この保存先に登録済みの場所の最大の ID を取得する
         ## 走査の途中でアップロードや監視が登録した場所は、これより大きな ID になるので、消えたファイルの確定の対象から外れる
         max_file_id = 0
-        max_file_ids = await CaptureFile.filter(file_path__startswith=root_prefix).order_by('-id').limit(1).values_list('id', flat=True)
+        max_file_ids = await CaptureFile.filter(*file_path_filters).order_by('-id').limit(1).values_list('id', flat=True)
         if len(max_file_ids) > 0:
             max_file_id = cast(int, max_file_ids[0])
 
@@ -955,7 +976,7 @@ class CaptureScanTask:
         last_id = 0
         while True:
             rows = await CaptureFile.filter(
-                file_path__startswith = root_prefix,
+                *file_path_filters,
                 id__gt = last_id,
                 id__lte = max_file_id,
             ).order_by('id').limit(self.SNAPSHOT_PAGE_SIZE).values_list(
@@ -976,8 +997,42 @@ class CaptureScanTask:
         found_count = 0
         is_complete = True
 
+        # どの保存先にも属さない場所は、列挙するフォルダがないので、場所ごとにファイルがまだあるかを確かめ、あれば見つかったものとして記録する
+        ## 録画の一括スキャンと同じく、ファイルがまだある場所は、保存先から外したあとも画像を開けるのでそのまま残す
+        ## 読めない場所 (通信エラーなど) は、消えたとは確定できないので、見つかったものとして扱う
+        if root is None:
+            last_id = 0
+            while True:
+                rows = await CaptureFile.filter(
+                    *file_path_filters,
+                    id__gt = last_id,
+                    id__lte = max_file_id,
+                ).order_by('id').limit(self.SNAPSHOT_PAGE_SIZE).values_list('id', 'file_path', 'status')
+                if len(rows) == 0:
+                    break
+                last_id = rows[-1][0]
+                for file_id, file_path, file_status in rows:
+                    try:
+                        await anyio.Path(file_path).stat()
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        seen_file_ids[file_id] = 1
+                        found_count += 1
+                        continue
+                    seen_file_ids[file_id] = 1
+                    found_count += 1
+
+                    # 見つからなくなっていたファイルが戻ってきた場合 (マウントが間に合わなかったフォルダや、ごみ箱から戻した画像) は、
+                    # 保存先の走査と同じく registerFile() で利用できる状態に戻す
+                    ## 読み込みや DB の一時的な失敗で戻せなかった場合は、保存先の走査と同じく、走査を完了できなかったものとして扱う
+                    if file_status == 'Missing' and await self.processFile(file_path) is False:
+                        is_complete = False
+
         # rglob は走査中の OSError を黙って捨てるので、フォルダを1つずつ列挙して、読めなかったフォルダを数える
-        pending_folders = [anyio.Path(root)]
+        pending_folders: list[anyio.Path] = []
+        if root is not None:
+            pending_folders.append(anyio.Path(root))
         while len(pending_folders) > 0:
             folder = pending_folders.pop()
             try:
@@ -1086,6 +1141,7 @@ class CaptureScanTask:
 
         return CaptureRootScanResult(
             root = root,
+            file_path_filters = file_path_filters,
             started_at = scan_started_at,
             max_file_id = max_file_id,
             file_state_hashes = file_state_hashes,
@@ -1197,7 +1253,7 @@ class CaptureScanTask:
         last_id = 0
         while True:
             rows = await CaptureFile.filter(
-                file_path__startswith = os.path.join(result.root, ''),
+                *result.file_path_filters,
                 id__gt = last_id,
                 id__lte = result.max_file_id,
             ).order_by('id').limit(self.SNAPSHOT_PAGE_SIZE).values(
