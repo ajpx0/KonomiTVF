@@ -38,20 +38,20 @@
                             <Icon :icon="isInfoOpen ? 'fluent:info-24-filled' : 'fluent:info-24-regular'" width="24px" />
                         </div>
                         <!-- その他の操作 (録画番組のメニューと同じく、取り消せない削除は区切り線の下に赤で置き、押し間違えにくくする) -->
-                        <v-menu location="bottom end" :z-index="2400">
+                        <v-menu v-if="canSetThumbnail" v-model="isMenuOpen" location="bottom end" :z-index="2400">
                             <template #activator="{ props: menuProps }">
                                 <div v-ripple class="capture-lightbox__button" v-bind="menuProps">
                                     <Icon icon="fluent:more-vertical-24-filled" width="24px" />
                                 </div>
                             </template>
                             <v-list density="compact" bg-color="background-lighten-1">
-                                <v-list-item v-if="canSetThumbnail" @click="setAsThumbnail">
+                                <v-list-item @click="setAsThumbnail">
                                     <template #prepend>
                                         <Icon icon="fluent:image-20-regular" width="20px" height="20px" />
                                     </template>
                                     <v-list-item-title class="ml-3">録画番組のサムネイルにする</v-list-item-title>
                                 </v-list-item>
-                                <v-divider v-if="canSetThumbnail"></v-divider>
+                                <v-divider></v-divider>
                                 <v-list-item class="capture-lightbox__menu-item--danger" @click="requestDelete">
                                     <template #prepend>
                                         <Icon icon="fluent:delete-20-regular" width="20px" height="20px" />
@@ -60,6 +60,11 @@
                                 </v-list-item>
                             </v-list>
                         </v-menu>
+                        <!-- 録画のないキャプチャでは削除のほかに項目がないので、選択中のバーと同じく、確認のダイアログを開く削除のボタンを右端に赤で置く -->
+                        <div v-else v-ripple class="capture-lightbox__button capture-lightbox__button--danger" v-ftooltip.bottom="'キャプチャを削除 (Delete)'"
+                            @click="requestDelete">
+                            <Icon icon="fluent:delete-24-regular" width="24px" />
+                        </div>
                     </div>
 
                     <!-- 画像: 前・今・次の3枚を横に並べ、指の動きに合わせて全体をずらす -->
@@ -214,6 +219,8 @@ const EASING = 'cubic-bezier(0.26, 0.68, 0.55, 0.99)';
 
 const isTagDialogOpen = ref(false);
 const isDeleteConfirmOpen = ref(false);
+// ︙ のメニューを開いているか (戻る操作でメニューだけを閉じるため)
+const isMenuOpen = ref(false);
 // 確認のダイアログの削除のボタン (開いたときにフォーカスを当てるため)
 const deleteButtonRef = ref<ComponentPublicInstance | null>(null);
 const detail = ref<ICaptureDetail | null>(null);
@@ -1213,10 +1220,22 @@ const playRecording = async () => {
 let hasHistoryEntry = false;
 const onPopState = () => {
     if (hasHistoryEntry) {
-        // タグや削除の確認のダイアログが上に重なっているときは、写真アプリと同じく一番上のダイアログだけを閉じ、1枚表示の履歴を積み直す
-        if (isTagDialogOpen.value || isDeleteConfirmOpen.value) {
+        // ︙ のメニューや、タグや削除の確認のダイアログが上に重なっているときは、写真アプリと同じく一番上のものだけを閉じ、1枚表示の履歴を積み直す
+        // Vuetify も戻る操作で開いているメニューやダイアログを閉じようとし、開いたままだと戻る操作を取り消すときにさらに1つ前の履歴へ戻ってしまう
+        // Vuetify の判定は後から非同期で行われるので、ここで先に閉じておくと、Vuetify は戻る操作をそのまま通す
+        if (isTagDialogOpen.value || isDeleteConfirmOpen.value || isMenuOpen.value) {
             isTagDialogOpen.value = false;
             isDeleteConfirmOpen.value = false;
+            isMenuOpen.value = false;
+            window.history.pushState({ ...window.history.state }, '');
+            return;
+        }
+        // ショートカットの一覧のように、拡大表示の外の部品が開いたダイアログが重なっているときも、そのダイアログだけを閉じる
+        // 開閉の状態は拡大表示から変えられないので、Vuetify のダイアログが Esc キーで閉じる処理を、ダイアログの中で Esc キーを押したときと同じイベントで呼び出す
+        // ダイアログの中で押されたキーは、拡大表示と一覧のキーの処理がどちらも見送るので、閉じるのはダイアログだけになる
+        const overlayContent = document.querySelector('.v-dialog.v-overlay--active > .v-overlay__content');
+        if (overlayContent !== null) {
+            overlayContent.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
             window.history.pushState({ ...window.history.state }, '');
             return;
         }
@@ -1309,6 +1328,7 @@ watch(() => props.capture !== null, (isOpen) => {
         dismissY.value = 0;
         isTagDialogOpen.value = false;
         isDeleteConfirmOpen.value = false;
+        isMenuOpen.value = false;
     }
 }, { immediate: true });
 onBeforeUnmount(() => {
@@ -1370,6 +1390,10 @@ onBeforeUnmount(() => {
             &:hover {
                 background: transparent;
             }
+        }
+        // 取り消せない削除は、ほかの操作と見分けられるよう赤で表示する (CaptureSelectionBar.vue と同じ色)
+        &--danger {
+            color: rgb(var(--v-theme-error-lighten-1));
         }
     }
 
