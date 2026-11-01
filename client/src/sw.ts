@@ -21,7 +21,21 @@ precacheAndRoute(self.__WB_MANIFEST);
 cleanupOutdatedCaches();
 
 // 通常画面は従来の generateSW と同じく index.html へ戻し、API と Cloudflare の内部 URL は対象から外す
-registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html'), {
+// Cloudflare Access のログイン切れなどでサーバーがリダイレクトを返す場合はそのリダイレクトに従わせ、
+// オフラインや3秒以内に応答がない場合は事前キャッシュした index.html を返す
+const indexHandler = createHandlerBoundToURL('index.html');
+registerRoute(new NavigationRoute(async (options) => {
+    try {
+        const response = await fetch(options.request, {signal: AbortSignal.timeout(3 * 1000)});
+        if (response.type === 'opaqueredirect') {
+            return response;
+        }
+        await response.body?.cancel();
+    } catch {
+        // 通信できない場合は事前キャッシュした index.html を返す
+    }
+    return indexHandler(options);
+}, {
     denylist: [/^\/api/, /^\/cdn-cgi/],
 }));
 
