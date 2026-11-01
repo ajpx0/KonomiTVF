@@ -235,7 +235,22 @@ const onLogoError = (event: Event) => {
     &__toolbar {
         display: flex;
         gap: 10px;
-        margin-bottom: 16px;
+        // 下までスクロールしてから検索や絞り込みを変えられるよう、ヘッダーの下に隠れる位置まで来たら画面の上端にくっつける
+        // くっついている間も後ろの番組のカードが透けないよう背景を塗り、上下の余白も背景に含める (止まっているときの見た目は変えない)
+        position: sticky;
+        top: 65px;
+        z-index: 5;
+        margin-top: -10px;
+        padding-top: 10px;
+        padding-bottom: 16px;
+        background: rgb(var(--v-theme-background));
+        // スマホの横画面では上部のヘッダーを表示せず、縦画面では上部のバーがページと一緒にスクロールするので、どちらも画面の最上端にくっつける
+        @include smartphone-horizontal {
+            top: 0;
+        }
+        @include smartphone-vertical {
+            top: 0;
+        }
         // 検索欄と2つの選択欄を1行に並べられない画面幅では、1段目に検索欄を全幅で、2段目に選択欄を並べる
         @include tablet-vertical {
             flex-direction: column;
