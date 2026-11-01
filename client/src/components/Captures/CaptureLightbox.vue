@@ -77,7 +77,7 @@
                                     :class="{'capture-lightbox__image--current': slide.offset === 0}" decoding="async"
                                     :style="[getImageSizeStyle(slide.capture), slide.offset === 0 ? zoomStyle : {}]"
                                     :alt="slide.capture.caption_text ?? ''" draggable="false"
-                                    @touchstart="onImageTouchStart" @pointerdown="onImagePointerDown" @pointermove="onImagePointerMove"
+                                    @pointerdown="onImagePointerDown" @pointermove="onImagePointerMove"
                                     @pointerup="onImagePointerUp" @pointercancel="onImagePointerUp">
                             </div>
                         </div>
@@ -539,6 +539,9 @@ interface ITouchTrack {
     axis: 'X' | 'Y' | null;
     // 縦に動かしたとき、何を動かすか
     verticalTarget: 'Sheet' | 'Dismiss' | 'Scroll' | null;
+    // 拡大している間に触り始めたときの、表示する場所のずれ (拡大していないときは null)
+    // 拡大している間の指の動きは、隣へ送るスワイプではなく表示する場所の移動として扱う
+    pan: { x: number; y: number } | null;
 }
 let touch: ITouchTrack | null = null;
 // 指で触った直後のクリックで閉じないよう、タッチの操作中であることを覚える
@@ -553,8 +556,43 @@ const beginTouch = (event: TouchEvent): ITouchTrack => {
         startX: point.clientX, startY: point.clientY, lastY: point.clientY,
         lastTime: event.timeStamp, velocityY: 0, startTime: event.timeStamp,
         axis: null, verticalTarget: null,
+        pan: isZoomed.value ? { x: panX.value, y: panY.value } : null,
     };
 };
+
+// 2本の指でのピンチの記録 (前回の指の間の距離と、2本の指の中点)
+// 写真アプリと同じく、2本の指の間隔に合わせて拡大・縮小し、中点の動きに合わせて表示する場所をずらす
+interface IPinchTrack {
+    distance: number;
+    centerX: number;
+    centerY: number;
+}
+let pinch: IPinchTrack | null = null;
+// 画像を表示する領域に触れている指の数 (指で触れている間のピンチを、Safari のジェスチャーのイベントではなく Touch イベントで扱うため)
+let stageTouchCount = 0;
+const measurePinch = (event: TouchEvent): IPinchTrack => {
+    const [first, second] = [event.touches[0], event.touches[1]];
+    return {
+        distance: Math.max(Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY), 1),
+        centerX: (first.clientX + second.clientX) / 2,
+        centerY: (first.clientY + second.clientY) / 2,
+    };
+};
+
+// 2本目の指が置かれたときに、1本指で始めた操作 (横の送り・縦のシート・下へ引いて閉じる・拡大中の移動) をやめて、画像とシートを元の位置へ戻す
+const cancelOneFingerDrag = () => {
+    touch = null;
+    isFollowingFinger.value = false;
+    isZoomFollowing.value = false;
+    dragX.value = 0;
+    dismissY.value = 0;
+    sheetDragProgress.value = null;
+};
+
+// 直前のタップの時刻と位置 (写真アプリと同じく、同じ場所を素早く2回タップしたら拡大・縮小する)
+let lastTap: { time: number; x: number; y: number } | null = null;
+const DOUBLE_TAP_INTERVAL = 300;
+const DOUBLE_TAP_DISTANCE = 30;
 const trackVelocity = (track: ITouchTrack, event: TouchEvent) => {
     const y = event.touches[0].clientY;
     const elapsed = Math.max(event.timeStamp - track.lastTime, 1);
@@ -564,14 +602,47 @@ const trackVelocity = (track: ITouchTrack, event: TouchEvent) => {
 };
 
 const onStageTouchStart = (event: TouchEvent) => {
+    stageTouchCount = event.touches.length;
+    // 2本目の指が置かれたら、1本指の操作をやめて元の位置へ戻し、ピンチでの拡大・縮小を始める
+    // 隣へ送っている途中は、送った後に拡大率が元に戻るので、ピンチを始めない
+    if (event.touches.length >= 2) {
+        cancelOneFingerDrag();
+        lastTap = null;
+        if (event.touches.length === 2 && !isSliding.value) {
+            pinch = measurePinch(event);
+            // 指の動きに合わせて細かく拡大率が変わるので、ピンチしている間はアニメーションを止める
+            isZoomFollowing.value = true;
+            lastTouchTime = Date.now();
+        } else {
+            pinch = null;
+            isZoomFollowing.value = false;
+        }
+        return;
+    }
     if (event.touches.length !== 1 || isSliding.value) {
         touch = null;
         return;
     }
     touch = beginTouch(event);
+    // 拡大している間は、指に合わせて表示する場所をずらすので、アニメーションを止める
+    if (touch.pan !== null) {
+        isZoomFollowing.value = true;
+    }
     showControl();
 };
 const onStageTouchMove = (event: TouchEvent) => {
+    // ピンチしている間は、2本の指の間隔の変化に合わせて、中点を中心に拡大・縮小し、中点の動きに合わせて表示する場所をずらす
+    if (pinch !== null) {
+        if (event.touches.length !== 2) {
+            return;
+        }
+        event.preventDefault();
+        const next = measurePinch(event);
+        setZoom(zoom.value * next.distance / pinch.distance, { clientX: next.centerX, clientY: next.centerY });
+        setPan(panX.value + next.centerX - pinch.centerX, panY.value + next.centerY - pinch.centerY);
+        pinch = next;
+        return;
+    }
     if (touch === null || event.touches.length !== 1) {
         return;
     }
@@ -583,13 +654,19 @@ const onStageTouchMove = (event: TouchEvent) => {
             return;
         }
         touch.axis = Math.abs(dx) > Math.abs(dy) ? 'X' : 'Y';
-        if (touch.axis === 'Y') {
+        if (touch.axis === 'Y' && touch.pan === null) {
             // 縦画面では上下でシートを開閉し、シートを閉じているときに下へ引いたら1枚表示を閉じる (写真アプリと同じ)
             const isOpeningOrClosingSheet = isPortrait.value && (isInfoOpen.value || dy < 0);
             touch.verticalTarget = isOpeningOrClosingSheet ? 'Sheet' : 'Dismiss';
         }
     }
     event.preventDefault();
+    // 拡大している間は、送りやシートの操作ではなく、拡大した画像の表示する場所を指に合わせてずらす
+    if (touch.pan !== null) {
+        setPan(touch.pan.x + dx, touch.pan.y + dy);
+        showControl();
+        return;
+    }
     isFollowingFinger.value = true;
     if (touch.axis === 'X') {
         followHorizontal(dx);
@@ -601,6 +678,22 @@ const onStageTouchMove = (event: TouchEvent) => {
     }
 };
 const onStageTouchEnd = (event: TouchEvent) => {
+    stageTouchCount = event.touches.length;
+    // ピンチの途中で指を離したときは、ピンチを終える
+    // 拡大したまま1本の指が残っていれば、写真アプリと同じく、残った指でそのまま表示する場所をずらせるようにする
+    if (pinch !== null) {
+        if (event.touches.length >= 2) {
+            return;
+        }
+        pinch = null;
+        lastTouchTime = Date.now();
+        isZoomFollowing.value = false;
+        if (event.touches.length === 1 && isZoomed.value) {
+            touch = beginTouch(event);
+            isZoomFollowing.value = true;
+        }
+        return;
+    }
     if (touch === null) {
         return;
     }
@@ -608,7 +701,9 @@ const onStageTouchEnd = (event: TouchEvent) => {
     touch = null;
     lastTouchTime = Date.now();
     isFollowingFinger.value = false;
-    if (track.axis === 'X') {
+    if (track.pan !== null) {
+        isZoomFollowing.value = false;
+    } else if (track.axis === 'X') {
         finishHorizontal(event, track);
     } else if (track.verticalTarget === 'Sheet') {
         settleSheet(track.velocityY);
@@ -618,6 +713,32 @@ const onStageTouchEnd = (event: TouchEvent) => {
             void close();
         }
         dismissY.value = 0;
+    }
+
+    // 動かさずに離したタッチ (タップ) が、直前のタップと同じ場所で素早く続いたら、ダブルタップとして拡大・縮小する
+    // 長く押してから離したときは、タップとして扱わない
+    const isTap = track.axis === null && event.timeStamp - track.startTime < DOUBLE_TAP_INTERVAL;
+    if (isTap === false) {
+        lastTap = null;
+        return;
+    }
+    const point = event.changedTouches[0];
+    let isDoubleTap = false;
+    if (lastTap !== null) {
+        const isQuick = event.timeStamp - lastTap.time < DOUBLE_TAP_INTERVAL;
+        const isNear = Math.hypot(point.clientX - lastTap.x, point.clientY - lastTap.y) < DOUBLE_TAP_DISTANCE;
+        isDoubleTap = isQuick && isNear;
+    }
+    if (isDoubleTap === false) {
+        lastTap = { time: event.timeStamp, x: point.clientX, y: point.clientY };
+        return;
+    }
+    // 拡大していれば元の大きさに戻し、拡大していなければタップした場所を中心に拡大する
+    lastTap = null;
+    if (isZoomed.value) {
+        resetZoom();
+    } else {
+        setZoom(DEFAULT_ZOOM, point);
     }
 };
 
@@ -643,6 +764,11 @@ const finishHorizontal = (event: TouchEvent, track: ITouchTrack) => {
 // シートの上でのタッチ (写真アプリと同じく、シートの上でも横に引けば前後へ送る)
 // 縦に引いたときは中身をスクロールし、中身が一番上までスクロールされているときに下へ引くとシートを閉じる
 const onSheetTouchStart = (event: TouchEvent) => {
+    // 画像の上で1本指の操作をしている途中に、2本目の指がシートに置かれたときも、1本指の操作をやめて元の位置へ戻す
+    if (event.touches.length >= 2) {
+        cancelOneFingerDrag();
+        return;
+    }
     if (!isPortrait.value || event.touches.length !== 1 || isSliding.value) {
         touch = null;
         return;
@@ -809,10 +935,11 @@ const zoomViewStyle = computed(() => {
     };
 });
 
-// 拡大している間は、画像をドラッグして表示する場所をずらす (マウスでも指でも同じ)
+// 拡大している間は、画像をマウスでドラッグして表示する場所をずらす
+// 指での操作は、ピンチやダブルタップと一緒に Touch イベントで扱う (上のタッチの操作を参照)
 let panStart: { pointerId: number; x: number; y: number; panX: number; panY: number } | null = null;
 const onImagePointerDown = (event: PointerEvent) => {
-    if (!isZoomed.value) {
+    if (!isZoomed.value || event.pointerType === 'touch') {
         return;
     }
     event.preventDefault();
@@ -834,12 +961,6 @@ const onImagePointerUp = (event: PointerEvent) => {
     }
     panStart = null;
     isZoomFollowing.value = false;
-};
-// 拡大している間の指の動きは、隣へ送るスワイプではなく表示する場所の移動として扱う
-const onImageTouchStart = (event: TouchEvent) => {
-    if (isZoomed.value) {
-        event.stopPropagation();
-    }
 };
 
 // トラックパッドのピンチと Ctrl キーを押しながらのホイールで拡大・縮小する
@@ -874,8 +995,13 @@ const onStageWheel = (event: WheelEvent) => {
 // Safari のジェスチャーのイベントは、ピンチを始めたときからの拡大率 (scale) を送ってくる
 let gestureStartZoom = MIN_ZOOM;
 let isGesturing = false;
+// iPhone や iPad の画面を指でピンチしたときは、同じピンチが Touch イベントでも届くので、指で触れている間は Touch イベントだけで拡大・縮小し、ジェスチャーのイベントは Mac のトラックパッドのピンチに使う
+// ジェスチャーのイベントは2本目の指の Touch イベントより先に届くので、1本目の指が触れた時点からの指の数で判定する
 const onStageGestureStart = (event: Event) => {
     event.preventDefault();
+    if (stageTouchCount > 0) {
+        return;
+    }
     isGesturing = true;
     gestureStartZoom = zoom.value;
 };
@@ -885,6 +1011,9 @@ const onStageGestureEnd = (event: Event) => {
 };
 const onStageGestureChange = (event: Event) => {
     event.preventDefault();
+    if (isGesturing === false) {
+        return;
+    }
     followZoomGesture();
     const gesture = event as Event & { scale: number; clientX: number; clientY: number };
     setZoom(gestureStartZoom * gesture.scale, gesture);
