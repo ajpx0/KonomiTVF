@@ -140,6 +140,53 @@ async def test_delete_capture__does_not_start_batch_scan(
 
 
 # -------------------------------------------------------------------------------------
+# ドライブのルートのように、ごみ箱や読めないフォルダを含む保存先を一括スキャンするフロー
+# (ごみ箱・権限のないフォルダを含む保存先 → CaptureScanTask.runBatchScan()) - 正常系
+# -------------------------------------------------------------------------------------
+
+
+async def test_batch_scan__skips_trash_and_unreadable_folders(client: httpx.AsyncClient, admin_headers: dict[str, str]) -> None:
+    """
+    保存先の中のごみ箱のフォルダは走査の対象から外し、権限がなくて読めないフォルダがあっても走査を最後まで終えたものとして扱い、
+    消えた画像を Missing にできる
+    """
+
+    # 保存先の直下に画像を1枚置き、ごみ箱のフォルダと、権限のないフォルダにも画像を置く
+    root = TEMP_DIR / 'drive-root'
+    root.mkdir()
+    file_name = 'Capture_20221003-224010.jpg'
+    trashed_name = 'Capture_20221219-001337.jpg'
+    shutil.copyfile(FIXTURES_DIR / 'captures' / file_name, root / file_name)
+    (root / '#recycle').mkdir()
+    shutil.copyfile(FIXTURES_DIR / 'captures' / trashed_name, root / '#recycle' / trashed_name)
+    (root / 'lost+found').mkdir()
+    shutil.copyfile(FIXTURES_DIR / 'captures' / trashed_name, root / 'lost+found' / trashed_name)
+    (root / 'lost+found').chmod(0o000)
+    try:
+        scanner = CaptureScanTask()
+        await WaitUntil(lambda: scanner.scan_lock.locked() is False)
+
+        # ごみ箱と権限のないフォルダの中の画像は登録されず、走査は最後まで終えたものとして扱われる
+        assert await scanner.runBatchScan([str(root)]) is True
+        registered_file = await CaptureFile.get(file_path=NormalizeCapturePath(root / file_name))
+        assert registered_file.status == 'Available'
+        assert await CaptureFile.filter(file_name=trashed_name).exists() is False
+
+        # 保存先の画像をごみ箱へ移すと、移動として付け替えずに Missing になる
+        (root / file_name).rename(root / '#recycle' / file_name)
+        assert await scanner.runBatchScan([str(root)]) is True
+        missing_file = await CaptureFile.get(id=registered_file.id)
+        assert missing_file.file_path == registered_file.file_path
+        assert missing_file.status == 'Missing'
+
+    # ほかのテストの一覧に混ざらないよう、登録したキャプチャを削除し、権限を戻して一時フォルダを消せるようにする
+    finally:
+        (root / 'lost+found').chmod(0o755)
+    response = await client.request('DELETE', '/api/captures', json={'capture_ids': [registered_file.capture_id]}, headers=admin_headers)
+    assert response.status_code == 200, response.text
+
+
+# -------------------------------------------------------------------------------------
 # Windows で大文字と小文字だけが異なるパスの場所が2つあるキャプチャを削除するフロー
 # (大文字と小文字を区別しないパスの照合 → DELETE /api/captures) - 正常系
 # -------------------------------------------------------------------------------------

@@ -331,6 +331,21 @@ class CaptureScanTask:
     # キャプチャとして扱う画像の拡張子
     CAPTURE_EXTENSIONS: ClassVar[tuple[str, ...]] = ('.jpg', '.jpeg', '.png')
 
+    # 保存先の中にあっても走査と監視の対象にしないフォルダの名前 (小文字で比べる)
+    ## ドライブや共有フォルダのルートを保存先にすると、OS や NAS のごみ箱・スナップショット・サムネイルのフォルダが中に入る
+    ## ごみ箱へ移したキャプチャを移動として付け替えたり、NAS が作る縮小画像をキャプチャとして登録したりしないよう、中身ごと外す
+    ## Linux のファイルマネージャーのごみ箱 (.Trash-1000 など) は、名前が .trash で始まるかで判定する
+    EXCLUDED_FOLDER_NAMES: ClassVar[frozenset[str]] = frozenset({
+        '$recycle.bin',  # Windows のごみ箱
+        'system volume information',  # Windows のシステムの領域
+        '#recycle',  # Synology のごみ箱
+        '#snapshot',  # Synology のスナップショット
+        '@eadir',  # Synology のサムネイル
+        '@recycle',  # QNAP のごみ箱
+        '@recently-snapshot',  # QNAP のスナップショット
+        '.@__thumb',  # QNAP のサムネイル
+    })
+
     # シングルトンインスタンス
     _instance: ClassVar[CaptureScanTask | None] = None
 
@@ -943,6 +958,15 @@ class CaptureScanTask:
             folder = pending_folders.pop()
             try:
                 directories, files = await asyncio.to_thread(self.listFolder, folder)
+            # 保存先の中の、権限がなくて読めないフォルダ (ドライブのルートの System Volume Information や lost+found など) は、走査の対象から外す
+            ## 中に登録済みの場所があっても、そのファイルの stat も権限で失敗するので、消えたファイルとしては確定されない
+            except PermissionError as ex:
+                if str(folder) == root:
+                    is_complete = False
+                    logging.warning(f'Cannot list capture folder: {folder}', exc_info=ex)
+                else:
+                    logging.warning(f'Skipped capture folder without read permission: {folder}')
+                continue
             except OSError as ex:
                 is_complete = False
                 logging.warning(f'Cannot list capture folder: {folder}', exc_info=ex)
@@ -1168,6 +1192,10 @@ class CaptureScanTask:
                     continue
 
                 if entry.is_dir(follow_symlinks=False):
+                    # ごみ箱やスナップショットのフォルダは、中身ごと走査の対象から外す
+                    folder_name = entry.name.lower()
+                    if folder_name in cls.EXCLUDED_FOLDER_NAMES or folder_name.startswith('.trash'):
+                        continue
                     directory_stat = entry.stat(follow_symlinks=False)
                     directories.append((NormalizeCapturePath(entry.path), directory_stat.st_mtime))
                     continue
@@ -1262,6 +1290,25 @@ class CaptureScanTask:
                 """
 
                 nonlocal waiting_scan_task
+
+                def IsWatchTarget(change: Change, path: str) -> bool:
+                    """
+                    一括スキャンと同じく、ごみ箱やスナップショットのフォルダの中の変化を監視の対象から外す
+
+                    Args:
+                        change (Change): 変化の種類
+                        path (str): 変化したパス
+
+                    Returns:
+                        bool: 監視の対象にする場合は True
+                    """
+
+                    for part in Path(path).relative_to(root).parts:
+                        folder_name = part.lower()
+                        if folder_name in self.EXCLUDED_FOLDER_NAMES or folder_name.startswith('.trash'):
+                            return False
+                    return True
+
                 # 監視が止まったあとで、保存先が見えるようになったら一括スキャンするか
                 ## awatch() を作り直しても、止まっている間に増えた画像は通知されないため、一括スキャンで取りこぼしを回収する
                 needs_scan_on_resume = False
@@ -1273,7 +1320,14 @@ class CaptureScanTask:
                                 waiting_scan_task = asyncio.create_task(ScanAfterCurrent())
                                 scan_tasks.add(waiting_scan_task)
                                 waiting_scan_task.add_done_callback(scan_tasks.discard)
-                        async for changes in awatch(root, force_polling=False):
+                        # 保存先の中の権限がなくて読めないフォルダ (lost+found など) は、一括スキャンと同じく監視の対象から外す
+                        ## 外さないと Linux では監視を始められず、5秒ごとの再試行のたびに一括スキャンを繰り返してしまう
+                        async for changes in awatch(
+                            root,
+                            force_polling = False,
+                            watch_filter = IsWatchTarget,
+                            ignore_permission_denied = True,
+                        ):
 
                             # 追加・変更された画像を登録する
                             for change, path in changes:
