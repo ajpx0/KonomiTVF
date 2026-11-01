@@ -1299,6 +1299,11 @@ const onKeyDown = (event: KeyboardEvent) => {
     if (event.ctrlKey || event.metaKey || event.altKey) {
         return;
     }
+    // 拡大率のスライダーを操作した後の左右の矢印キーは、スライダーで拡大率を変える操作としてスライダーに任せる
+    const isArrowKey = event.key === 'ArrowLeft' || event.key === 'ArrowRight';
+    if (isArrowKey && event.target instanceof Element && event.target.closest('.v-slider') !== null) {
+        return;
+    }
     switch (event.key) {
         case 'ArrowLeft': void move(-1); break;
         case 'ArrowRight': void move(1); break;
