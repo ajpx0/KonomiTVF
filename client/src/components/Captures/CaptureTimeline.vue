@@ -131,7 +131,6 @@ const totalHeight = computed(() => {
     return last ? last.top + last.height : 0;
 });
 const domHeight = computed(() => Math.min(totalHeight.value, MAX_DOM_HEIGHT));
-watch(grid, layout);
 
 // 日付から、日付ごとのまとまりの並びの中の位置を引く (範囲選択や、読み込んだ日を手放すときに使う)
 const sectionIndexByDate = computed(() => {
@@ -140,6 +139,50 @@ const sectionIndexByDate = computed(() => {
     return result;
 });
 
+// 画面の回転やウインドウの幅の変更で列の数やタイルの大きさが変わったときは、レイアウトし直したあとも、
+// 変更の前に画面の上端にあった日と、その日の中で上端にあったタイルの行を、画面の上端に保つ
+// ページのスクロール位置を px のまま保つと、各日の高さが変わった分だけ、見ていた日付から大きくずれるため
+watch(grid, async (next, previous) => {
+    const root = rootRef.value;
+
+    // 一覧が空のときや、戻る操作でスクロール位置を戻している間は、位置を合わせずにレイアウトだけをし直す
+    if (root === null || sections.value.length === 0 || restoringScrollUntil !== null) {
+        layout();
+        return;
+    }
+
+    // タイムラインの先頭より上 (見出しの部分) を見ているときは、レイアウトし直しても上端の位置は変わらない
+    const contentY = baseOffset.value - root.getBoundingClientRect().top;
+    if (contentY <= 0) {
+        layout();
+        return;
+    }
+
+    // 画面の上端にある日と、その日の中の位置を覚えておく
+    // タイルの部分を見ているときは、上端の行の最初のタイルの番号と、行の中のどこまで見えなくなっているかの割合で覚える
+    const index = findSectionIndex(contentY);
+    const offsetInSection = contentY - sections.value[index].top;
+    const tileOffset = offsetInSection - HEADER_HEIGHT;
+    const firstTileIndex = Math.floor(tileOffset / previous.rowHeight) * previous.columns;
+    const rowFraction = (tileOffset % previous.rowHeight) / previous.rowHeight;
+
+    // 新しい列の数でレイアウトし直し、覚えておいたタイルの行が今どこにあるかを求める
+    layout();
+    const section = sections.value[index];
+    let nextOffsetInSection = offsetInSection;
+    if (tileOffset > 0) {
+        nextOffsetInSection = HEADER_HEIGHT + (Math.floor(firstTileIndex / next.columns) + rowFraction) * next.rowHeight;
+    }
+    const nextContentY = section.top + Math.min(nextOffsetInSection, section.height);
+
+    // 移る先が要素の範囲の真ん中に来るよう要素の上端に当たる位置をずらし、新しい高さで描画されてからページをスクロールする
+    // 描画される前にスクロールすると、ブラウザが変更前の要素の高さの範囲にスクロール位置を収めてしまうため
+    baseOffset.value = centerBaseOffset(nextContentY);
+    await nextTick();
+    const rootTop = root.getBoundingClientRect().top + window.scrollY;
+    window.scrollTo({ top: rootTop + nextContentY - baseOffset.value, behavior: 'instant' });
+    onScroll();
+});
 
 // 全体の高さが変わったら (絞り込みや画面の幅の変更)、要素の範囲がタイムラインの外へはみ出さないようにずらす位置を収める
 watch(totalHeight, (height) => {
