@@ -154,7 +154,7 @@
                                 <Icon icon="fluent:dismiss-16-filled" width="18px" height="18px" />
                                 <span class="ml-1">キャンセル</span>
                             </v-btn>
-                            <v-btn ref="deleteButtonRef" color="error" variant="flat" height="40" class="px-3" @click="deleteCapture">
+                            <v-btn ref="deleteButtonRef" color="error" variant="flat" height="40" class="px-3" :loading="isDeleting" @click="deleteCapture">
                                 <Icon icon="fluent:delete-16-regular" width="18px" height="18px" />
                                 <span class="ml-1">キャプチャを削除</span>
                             </v-btn>
@@ -219,6 +219,7 @@ const EASING = 'cubic-bezier(0.26, 0.68, 0.55, 0.99)';
 
 const isTagDialogOpen = ref(false);
 const isDeleteConfirmOpen = ref(false);
+const isDeleting = ref(false);
 // ︙ のメニューを開いているか (戻る操作でメニューだけを閉じるため)
 const isMenuOpen = ref(false);
 // 確認のダイアログの削除のボタン (開いたときにフォーカスを当てるため)
@@ -1154,12 +1155,16 @@ const requestDelete = () => {
 };
 
 const deleteCapture = async () => {
-    if (props.capture === null) {
+    // 削除の途中で Enter キーが続けて押されたときは、最初の削除だけを送る
+    if (props.capture === null || isDeleting.value) {
         return;
     }
-    isDeleteConfirmOpen.value = false;
+    // 選択中のバーと同じく、応答が返るまでは確認のダイアログを開いたまま削除のボタンを読み込み中にする
+    isDeleting.value = true;
     const current = props.capture;
     const result = await Captures.deleteCaptures([current.id]);
+    isDeleting.value = false;
+    isDeleteConfirmOpen.value = false;
     if (result === null) {
         return;
     }
