@@ -46,6 +46,19 @@
 - クライアント開発サーバー経由で API リクエストが想定通りに動かない場合でも、**サーバーを立て直そうとしないでください**。まず `Utils.api_base_url` の DEV 分岐の挙動を読み直し、port 7000 で動いているサーバー側の状態を `ps -ef | grep KonomiTV` などで確認してください
 - 番組タイトルや番組概要を表示するときは必ず `ProgramUtils.decorateProgramInfo(program, 'field_name')` を使用してください
 
+### ログインが必要な画面の検証 (port 7200、エージェントが起動・停止する)
+
+- お気に入り・タグ・アカウントごとの設定のように、ログインした状態でしか動作しない画面は、ログインしていないブラウザで開いただけで「未確認」と報告せず、検証用のアカウントでログインして最後まで操作してください
+- `server/data/database.sqlite` にアカウントやお気に入りを作成すると実際のデータが変わるため、DB の複製を使う検証用のサーバーを port 7200 で別に起動します。`yarn dev` のクライアントは `:7000` を参照するため、この検証には使えません
+- 手順は次のとおりです
+  1. `git worktree add --detach <一時フォルダ> HEAD` で作業ツリーを作成し、`server/.venv` と、`server/thirdparty/` の中の各フォルダへのシンボリックリンクを配置する (`server/thirdparty` をフォルダごとリンクすると、作業ツリー側の空のフォルダの中にリンクが入れ子になる)
+  2. `sqlite3 -readonly server/data/database.sqlite ".backup '<作業ツリー>/server/data/database.sqlite'"` で DB を複製する (WAL に残っている書き込みも含めて複製するため、ファイルのコピーではなく `.backup` を使う)
+  3. `config.yaml` を作業ツリーにコピーし、`server.port` を 7200 に、`video.recorded_folders` を空の一時フォルダに変更する。Mirakurun を起動していない環境では、`general.always_receive_tv_from_mirakurun` を false にしないと設定の検査で起動に失敗する
+  4. 作業ツリーの `server/` で `uv run --frozen --no-sync task serve` を起動し、`https://my.local.konomi.tv:7200` を開く。配信されるのは作業ツリーの `client/dist` なので、クライアントの変更はビルドしてから検証する
+  5. `POST /api/users` で検証用のアカウント (`verify` / `verify-pass`) を作成し、ブラウザのログイン画面からログインする。お気に入りやタグは、絞り込みの結果の件数が一意に決まるように API で付けておく
+- キャプチャの保存先は実際のフォルダのままなので、検証の中でキャプチャをアップロードしたり、原ファイルを削除したりしないでください (検証用のアカウントは管理者ではないため、原ファイルの削除は拒否されます)
+- 検証が済んだら、起動したサーバーを停止し、`git worktree remove` で作業ツリーごと削除してください
+
 ### Docker 版ステージング (port 7100、別物)
 
 - `/Develop/KonomiTV-Docker` 以下には別途 Docker 版のステージング環境があります (port 7100、内部 HTTP は `127.0.0.77:7110`)
