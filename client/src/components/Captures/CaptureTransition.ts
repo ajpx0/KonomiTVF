@@ -31,27 +31,47 @@ export function canAnimateCaptureImage(): boolean {
  * @param src 画像の URL (タイルと1枚表示は同じ原寸の画像を表示しているので、読み込み済みのものが使われる)
  * @param from 動き始める位置と大きさ
  * @param to 動き終わる位置と大きさ
- * @returns 複製の画像と、動き終わったときに解決される Promise
+ * @returns 複製の要素と、動き終わったときに解決される Promise
  */
-export function flyCaptureImage(src: string, from: DOMRect, to: DOMRect): { element: HTMLImageElement; finished: Promise<void> } {
-    const element = document.createElement('img');
+export function flyCaptureImage(src: string, from: DOMRect, to: DOMRect): { element: HTMLElement; finished: Promise<void> } {
+
+    // 複製は、切り抜かずに画像の全体を表示する1枚表示の側 (面積の大きいほう) の位置と大きさで1回だけ配置する
+    // 位置と大きさ (left・top・width・height) を毎フレーム変えるとページ全体のレイアウトと描き直しが毎フレーム走り、
+    // 縦に長くスクロールした一覧ほどコマ落ちするので、動かすのは GPU の合成だけで済む transform にする
+    const base = from.width * from.height >= to.width * to.height ? from : to;
+    const element = document.createElement('div');
     element.className = 'capture-flying-image';
-    element.src = src;
-    element.alt = '';
+    element.style.left = `${base.left}px`;
+    element.style.top = `${base.top}px`;
+    element.style.width = `${base.width}px`;
+    element.style.height = `${base.height}px`;
+    const image = document.createElement('img');
+    image.className = 'capture-flying-image__image';
+    image.src = src;
+    image.alt = '';
+    element.append(image);
     document.body.append(element);
 
-    // タイルは画像を切り抜いて並べているので、縦横比の違いで画像が伸び縮みしないよう、位置と大きさを動かして切り抜いたまま表示する
-    const toKeyframe = (rect: DOMRect) => ({
-        left: `${rect.left}px`,
-        top: `${rect.top}px`,
-        width: `${rect.width}px`,
-        height: `${rect.height}px`,
-    });
-    const animation = element.animate([toKeyframe(from), toKeyframe(to)], {
+    // 外枠は、配置した箱を各時点の位置と大きさに合わせて伸び縮みさせ、はみ出した部分を切り抜く
+    // タイルは画像を縦横比のまま切り抜いて並べているので、中の画像は外枠の伸び縮みを打ち消しつつ、箱を覆う大きさまで拡大して切り抜いたまま見せる
+    const toKeyframes = (rect: DOMRect) => {
+        const scaleX = rect.width / base.width;
+        const scaleY = rect.height / base.height;
+        const coverScale = Math.max(scaleX, scaleY);
+        return {
+            outer: { transform: `translate(${rect.left - base.left}px, ${rect.top - base.top}px) scale(${scaleX}, ${scaleY})` },
+            inner: { transform: `scale(${coverScale / scaleX}, ${coverScale / scaleY})` },
+        };
+    };
+    const start = toKeyframes(from);
+    const end = toKeyframes(to);
+    const timing: KeyframeAnimationOptions = {
         duration: 200,
         easing: 'cubic-bezier(0.26, 0.68, 0.55, 0.99)',
         fill: 'forwards',
-    });
+    };
+    const animation = element.animate([start.outer, end.outer], timing);
+    image.animate([start.inner, end.inner], timing);
     return { element, finished: animation.finished.then(() => undefined, () => undefined) };
 }
 

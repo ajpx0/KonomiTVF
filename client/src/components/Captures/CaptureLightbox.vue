@@ -1665,9 +1665,19 @@ onBeforeUnmount(() => {
     position: fixed;
     z-index: 2350;
     margin: 0;
-    // タイルは画像を切り抜いて並べているので、縦横比の違いで画像が伸び縮みしないよう、切り抜いたまま重ねる
-    object-fit: cover;
+    // 外枠の伸び縮みは左上を基準にし、はみ出した画像を切り抜く
+    overflow: hidden;
+    transform-origin: 0 0;
     pointer-events: none;
+    will-change: transform;
+    // 中の画像は外枠の中央を基準に拡大し、外枠と同じ大きさで画像の全体を表示する
+    &__image {
+        display: block;
+        width: 100%;
+        height: 100%;
+        transform-origin: 50% 50%;
+        will-change: transform;
+    }
 }
 
 </style>
