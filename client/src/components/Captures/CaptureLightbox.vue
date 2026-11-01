@@ -1277,6 +1277,7 @@ const onKeyDown = (event: KeyboardEvent) => {
     // Mac のキーボードには Delete キーがないため、Finder と同じく Command+Backspace でも削除できるようにする
     if (event.key === 'Backspace' && event.metaKey && !event.ctrlKey && !event.altKey) {
         event.preventDefault();
+        event.stopImmediatePropagation();
         requestDelete();
         return;
     }
@@ -1298,9 +1299,13 @@ const onKeyDown = (event: KeyboardEvent) => {
         default: return;
     }
     event.preventDefault();
+    // 動きを減らす設定のときは、Space や Esc で拡大表示がすぐに閉じるため、同じキーを一覧のキーの処理 (CaptureKeyboard.ts) が受け取ると、開き直したり選択を解除したりしてしまう
+    // 拡大表示が扱ったキーは、ここで伝わるのを止めて、拡大表示の操作だけで終える
+    event.stopImmediatePropagation();
 };
-onMounted(() => window.addEventListener('keydown', onKeyDown));
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown));
+// 一覧のキーの処理も window で受け取るので、それより先に必ず受け取れるよう、キャプチャフェーズで受け取る
+onMounted(() => window.addEventListener('keydown', onKeyDown, { capture: true }));
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown, { capture: true }));
 
 // 開いている間はページのスクロールを止める
 // App.vue の html の overflow-y の指定より優先されるよう、Vuetify のダイアログと同じクラスを付ける
