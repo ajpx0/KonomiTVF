@@ -20,8 +20,8 @@
             <Icon :icon="selected || previewed ? 'fluent:checkmark-circle-24-filled' : 'fluent:circle-24-regular'" width="24px" height="24px" />
         </div>
         <!-- お気に入りのボタン (お気に入りに追加済みなら常に出し、そうでなければマウスを乗せたときだけ出す) -->
-        <!-- ログインしていないとき (is_favorite が null) は、お気に入りを使えないので出さない -->
-        <div v-if="capture.is_favorite !== null" v-ripple class="capture-tile__favorite"
+        <!-- ログインしていないとき (is_favorite が null) も表示し、押したときに拡大表示と同じくログインが必要なことを伝える -->
+        <div v-ripple class="capture-tile__favorite"
             :class="{'capture-tile__favorite--active': capture.is_favorite}"
             v-ftooltip.bottom="capture.is_favorite ? 'お気に入りから外す' : 'お気に入りに追加'"
             @click.stop="toggleFavorite">
@@ -50,6 +50,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { openWithTransition } from '@/components/Captures/CaptureTransition';
 import Message from '@/message';
 import Captures, { ICapture } from '@/services/Captures';
+import useUserStore from '@/stores/UserStore';
 
 
 const props = withDefaults(defineProps<{
@@ -75,6 +76,7 @@ const emit = defineEmits<{
     (event: 'updated', capture: ICapture): void;
 }>();
 
+const userStore = useUserStore();
 const imageRef = ref<HTMLImageElement | null>(null);
 const isLoaded = ref(false);
 
@@ -110,6 +112,11 @@ watch(() => props.capture.id, () => {
 // 応答を待つ間にタイルが別のキャプチャに使い回されても、押したときのキャプチャに結果を当てる
 let isUpdatingFavorite = false;
 const toggleFavorite = async () => {
+    // お気に入りはログインが必要なので、ログインしていなければ拡大表示や選択中のバーと同じ文言でログインを促す
+    if (!userStore.is_logged_in) {
+        Message.warning('お気に入りとタグを使うには、KonomiTV アカウントにログインしてください。');
+        return;
+    }
     if (isUpdatingFavorite) {
         return;
     }
