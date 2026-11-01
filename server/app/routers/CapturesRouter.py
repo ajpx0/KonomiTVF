@@ -848,7 +848,7 @@ async def CaptureUploadAPI(
     ## 万が一悪意ある攻撃者から危険なファイルを送り込まれないように
     ## 受け止めるのは画像として読めないことを示す例外だけにし (registerFile() と同じ)、実装側の誤りはそのまま 500 として伝える
     try:
-        await asyncio.to_thread(ReadCaptureImage, data, filename, modified_at)
+        info = await asyncio.to_thread(ReadCaptureImage, data, filename, modified_at)
     except (UnidentifiedImageError, SyntaxError, ValueError, Image.DecompressionBombError, OSError) as ex:
         logging.error('[CapturesRouter][CaptureUploadAPI] Invalid image file was uploaded.')
         raise HTTPException(
@@ -858,7 +858,7 @@ async def CaptureUploadAPI(
 
     # 同じ内容のキャプチャが、今も保存先に実在すると確認できたときだけ、保存を省いてそのキャプチャを返す
     scanner = CaptureScanTask()
-    existing_capture = await Capture.get_or_none(file_hash=hashlib.sha256(data).digest())
+    existing_capture = await Capture.get_or_none(file_hash=info.file_hash)
     if existing_capture is not None:
         for existing_file in await CaptureFile.filter(capture_id=existing_capture.id, status='Available'):
             try:
@@ -904,20 +904,17 @@ async def CaptureUploadAPI(
             else:
                 name = f'{Path(filename).stem}-{count}{Path(filename).suffix}'
             path = NormalizeCapturePath(root / name)
-            # 実際に作るファイルは、受け取った名前の大文字小文字のままにする (ロックと DB には正規化したパスを使う)
-            ## Windows の正規化はパスを小文字にするので、そのまま作ると、保存先のファイル名まで小文字になってしまう
-            saved_path = os.path.abspath(os.path.join(os.path.normpath(str(upload_folder)), name))
 
             async with scanner.getPathLock(path):
                 # このリクエストでファイルを作ったかどうか (保存に失敗したときに、作ったファイルだけを消すため)
                 is_created = False
                 try:
                     # 同じ秒に撮った2枚を同時に受け取っても別の名前で保存できるよう、ファイルの作成そのものを排他的に行う
-                    async with await anyio.open_file(saved_path, 'xb') as output:
+                    async with await anyio.open_file(path, 'xb') as output:
                         is_created = True
                         await output.write(data)
                     if file_modified_at is not None:
-                        await asyncio.to_thread(os.utime, saved_path, (modified_at.timestamp(), modified_at.timestamp()))
+                        await asyncio.to_thread(os.utime, path, (modified_at.timestamp(), modified_at.timestamp()))
 
                     # 保存したファイルを、スキャンを待たずにその場でキャプチャとして登録する
                     capture = await scanner.registerFile(path, data=data)
@@ -937,9 +934,9 @@ async def CaptureUploadAPI(
                     ## 残しておくと、次のスキャンで画像として読めないファイルとして登録され、保存先に溜まっていく
                     if is_created is True:
                         try:
-                            await anyio.Path(saved_path).unlink(missing_ok=True)
+                            await anyio.Path(path).unlink(missing_ok=True)
                         except OSError as unlink_ex:
-                            logging.error(f'Cannot delete partially written capture image: {saved_path}', exc_info=unlink_ex)
+                            logging.error(f'Cannot delete partially written capture image: {path}', exc_info=unlink_ex)
 
                     if isinstance(ex, PermissionError):
                         raise HTTPException(
