@@ -94,6 +94,8 @@ const SECTION_GAP = 14;
 const REVEAL_TOP_MARGIN = 72;
 // 画面の下端から、複数選択中の下部のバーに隠れずに見える位置までの高さ (px)
 const REVEAL_BOTTOM_MARGIN = 96;
+// 読み込んだキャプチャを持っておく、画面の上下それぞれの画面数 (これより離れた日のキャプチャは手放し、近づいたら読み込み直す)
+const KEEP_LOADED_SCREENS = 10;
 // ブラウザが扱える要素の高さには上限 (Chrome では約 3,355 万 px) があり、百万枚規模ではそれを超える
 // そのため要素の高さはこの値までにとどめ、要素の上端に当たるタイムラインの位置 (baseOffset) をずらしながら、その範囲だけを描画する
 // macOS の Chrome では、画面の倍率が 2 のときに要素の上端から約 420 万 px (約 840 万デバイスピクセル) より下に置いたタイルが描画されないため、
@@ -269,6 +271,62 @@ watch(visibleSections, (list) => {
             continue;
         }
         void loadDay(section.date);
+    }
+
+    // 範囲選択の起点の日から、キーボードで動かしているカーソルの日までは、Shift キーでの範囲選択に使うので持っておく
+    let pinnedFrom = Infinity;
+    let pinnedTo = -Infinity;
+    for (const capture of [props.selection.anchor.value, props.selection.getCursor()]) {
+        if (capture === null) {
+            continue;
+        }
+        const date = dateOf(capture);
+        const index = date === null ? undefined : sectionIndexByDate.value.get(date);
+        if (index !== undefined) {
+            pinnedFrom = Math.min(pinnedFrom, index);
+            pinnedTo = Math.max(pinnedTo, index);
+        }
+    }
+
+    // 画面から十分に離れた日のキャプチャは手放し、長くスクロールしても持っているキャプチャが一定の量に収まるようにする
+    // 手放した日は、また近づいたときや、拡大表示やキーボードでその日へ移るときに読み込み直す
+    const keepMargin = viewportHeight.value * KEEP_LOADED_SCREENS;
+    const keepTop = scrollOffset.value - keepMargin;
+    const keepBottom = scrollOffset.value + viewportHeight.value + keepMargin;
+    let next: Map<string, ICapture[]> | null = null;
+    for (const date of loadedDays.value.keys()) {
+        const index = sectionIndexByDate.value.get(date);
+        if (index !== undefined) {
+            const section = sections.value[index];
+            const isNear = section.top + section.height >= keepTop && section.top <= keepBottom;
+            const isPinned = pinnedFrom <= index && index <= pinnedTo;
+            if (isNear || isPinned) {
+                continue;
+            }
+        }
+        if (next === null) {
+            next = new Map(loadedDays.value);
+        }
+        next.delete(date);
+    }
+    if (next === null) {
+        return;
+    }
+    loadedDays.value = next;
+
+    // 手放した日のキャプチャだけが参照していた番組の情報も手放す
+    const usedProgramIds = new Set<number>();
+    for (const captures of next.values()) {
+        for (const capture of captures) {
+            if (capture.capture_program_id !== null) {
+                usedProgramIds.add(capture.capture_program_id);
+            }
+        }
+    }
+    for (const programId of programs.keys()) {
+        if (usedProgramIds.has(programId) === false) {
+            programs.delete(programId);
+        }
     }
 });
 
@@ -834,10 +892,14 @@ const revealCapture = async (capture: ICapture) => {
     }
 
     // タイルのタイムラインの先頭からの位置を求める
+    // 画面から離れて手放した日のキャプチャ (拡大表示で遠くの日まで送ったときなど) は、読み込み直してから位置を求める
     const date = dateOf(capture);
     const section = sections.value.find(item => item.date === date);
-    const position = date === null ? -1 : (loadedDays.value.get(date)?.findIndex(item => item.id === capture.id) ?? -1);
-    if (section === undefined || position === -1) {
+    if (date === null || section === undefined) {
+        return;
+    }
+    const position = (await waitForDay(date))?.findIndex(item => item.id === capture.id) ?? -1;
+    if (position === -1 || rootRef.value === null) {
         return;
     }
     const { columns, rowHeight, tileHeight } = grid.value;
