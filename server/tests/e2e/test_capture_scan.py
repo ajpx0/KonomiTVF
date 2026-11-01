@@ -187,6 +187,48 @@ async def test_batch_scan__skips_trash_and_unreadable_folders(client: httpx.Asyn
 
 
 # -------------------------------------------------------------------------------------
+# 監視している保存先の中で画像を別のフォルダへ移すフロー
+# (POST /api/captures → 保存先の画像の移動 → 保存先の監視) - 正常系
+# -------------------------------------------------------------------------------------
+
+
+async def test_watch__relinks_file_moved_within_capture_folder(client: httpx.AsyncClient, admin_headers: dict[str, str], capture_folder: Path) -> None:
+    """
+    監視している保存先の中で別のフォルダへ移した画像は、一括スキャンを待たずに同じ場所の行のまま新しいパスに付け替わる
+    """
+
+    # 移動先の子フォルダを先に作り、監視がその中の変化も通知するようになるまで待つ
+    ## 作った直後に移すと、子フォルダの追加の通知から一括スキャンが始まり、監視の移動の照合を通らない
+    (capture_folder / 'moved').mkdir()
+    await asyncio.sleep(3)
+    await WaitUntil(lambda: CaptureScanTask().scan_lock.locked() is False)
+
+    # アップロードしたキャプチャの画像を、保存先の中の子フォルダへ移す
+    file_name = 'Capture_20260826-044039.jpg'
+    response = await client.post('/api/captures', files={'image': (file_name, (FIXTURES_DIR / 'captures' / file_name).read_bytes(), 'image/jpeg')})
+    assert response.status_code == 201, response.text
+    capture = response.json()
+    uploaded_file = await CaptureFile.get(capture_id=capture['id'])
+    moved_path = NormalizeCapturePath(capture_folder / 'moved' / file_name)
+    Path(uploaded_file.file_path).rename(moved_path)
+
+    # 監視の通知で、同じ行が新しいパスに付け替わり、場所の行は1つのまま増えない
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 30
+    while (await CaptureFile.get(id=uploaded_file.id)).file_path != moved_path:
+        assert loop.time() < deadline, 'Moved capture was not relinked within 30 seconds.'
+        await asyncio.sleep(0.2)
+    files = await CaptureFile.filter(capture_id=capture['id'])
+    assert [(file.id, file.status) for file in files] == [(uploaded_file.id, 'Available')]
+
+    # ほかのテストの一覧に混ざらないよう、アップロードしたキャプチャを削除する
+    response = await client.request('DELETE', '/api/captures', json={'capture_ids': [capture['id']]}, headers=admin_headers)
+    assert response.status_code == 200, response.text
+    await WaitUntil(lambda: CaptureScanTask().scan_lock.locked() is False)
+    (capture_folder / 'moved').rmdir()
+
+
+# -------------------------------------------------------------------------------------
 # Windows で大文字と小文字だけが異なるパスの場所が2つあるキャプチャを削除するフロー
 # (大文字と小文字を区別しないパスの照合 → DELETE /api/captures) - 正常系
 # -------------------------------------------------------------------------------------

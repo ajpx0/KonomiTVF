@@ -695,6 +695,98 @@ class CaptureScanTask:
                 return False
 
 
+    async def moveFile(self, path: str, size: int, created_at: datetime, modified_at: datetime, seen_file_ids: bytearray) -> bool:
+        """
+        一括スキャンと監視で新しく見つかったパスが、消えたパスからの移動なら、DB の場所を付け替える
+        移動かどうかは、中身を読まずにファイル名・サイズ・更新日時の一致だけで判定する
+        作成日時は移動で変わる (Linux では名前の変更で更新され、ドライブをまたぐ移動ではファイルが作り直される) ため照合に使わず、付け替えるときに新しい値で更新する
+
+        Args:
+            path (str): 新しく見つかったパス
+            size (int): 新しく見つかったファイルのサイズ
+            created_at (datetime): 新しく見つかったファイルの作成日時
+            modified_at (datetime): 新しく見つかったファイルの更新日時
+            seen_file_ids (bytearray): 一括スキャンで見つかった場所の ID に 1 を記録した配列 (監視からは空の配列を渡す)
+
+        Returns:
+            bool: 移動として場所を付け替えた場合は True
+        """
+
+        file_name = Path(path).name
+
+        # すべての保存先から、ファイル名・サイズ・更新日時が同じ場所を候補として DB から探す
+        ## capture_files_name_size_modified_at のインデックスで引けるので、新しく見つかったパスごとに問い合わせても軽い
+        candidate_rows = await CaptureFile.filter(
+            file_name = file_name,
+            file_size = size,
+            file_modified_at = modified_at,
+        ).values('id', 'file_path')
+
+        for candidate_row in candidate_rows:
+            old_id: int = candidate_row['id']
+            old_path: str = candidate_row['file_path']
+            if CapturePathKey(old_path) == CapturePathKey(path):
+                continue
+
+            # この走査ですでに見つかった場所は、古いパスにファイルがあるので候補から外す
+            if old_id < len(seen_file_ids) and seen_file_ids[old_id] == 1:
+                continue
+
+            # 古いパスと新しいパスの両方のロックを、パスの順に取る (取る順を揃えてデッドロックを避ける)
+            async with AsyncExitStack() as stack:
+                for locked_path in sorted((old_path, path), key=CapturePathKey):
+                    await stack.enter_async_context(self.getPathLock(locked_path))
+
+                # 古いパスにまだファイルがあれば移動ではない (読めない場合も移動とは判定しない)
+                try:
+                    await anyio.Path(old_path).stat()
+                    continue
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    continue
+
+                # ロックを取るまでの間に、古い場所の行や新しいファイルが変わっていないかを確かめる
+                current_file = await CaptureFile.get_or_none(id=old_id, file_path=old_path)
+                if current_file is None:
+                    continue
+                new_stat = await anyio.Path(path).stat()
+                is_same_file = (
+                    current_file.file_size == size and
+                    current_file.file_modified_at == modified_at and
+                    new_stat.st_size == size and
+                    datetime.fromtimestamp(new_stat.st_mtime, JST) == modified_at
+                )
+                if is_same_file is False:
+                    continue
+
+                # 新しいパスがまだ登録されていなければ、古い場所の行を新しいパスに付け替える
+                is_moved = False
+                async with InWriteTransaction():
+                    if not await CaptureFile.filter(file_path=path).exists():
+                        if current_file.capture_id is not None:
+                            moved_status = 'Available'
+                        else:
+                            moved_status = 'Invalid'
+                        await CaptureFile.filter(id=current_file.id).update(
+                            file_path = path,
+                            file_name = file_name,
+                            file_created_at = created_at,
+                            status = moved_status,
+                            missing_since = None,
+                        )
+                        # 付け替えた場所は、消えたファイルの候補から外す
+                        if old_id < len(seen_file_ids):
+                            seen_file_ids[old_id] = 1
+                        is_moved = True
+
+                if is_moved is True:
+                    self.invalidateSections()
+                    return True
+
+        return False
+
+
     async def runBatchScan(self, folders: list[str] | None = None) -> bool:
         """
         保存先フォルダ以下の一括スキャンと DB への同期を実行する
@@ -861,97 +953,6 @@ class CaptureScanTask:
         found_count = 0
         is_complete = True
 
-        async def MoveCaptureFile(path: str, size: int, created_at: datetime, modified_at: datetime) -> bool:
-            """
-            新しく見つかったパスが、消えたパスからの移動なら、DB の場所を付け替える
-            移動かどうかは、中身を読まずにファイル名・サイズ・更新日時の一致だけで判定する
-            作成日時は移動で変わる (Linux では名前の変更で更新され、ドライブをまたぐ移動ではファイルが作り直される) ため照合に使わず、付け替えるときに新しい値で更新する
-
-            Args:
-                path (str): 新しく見つかったパス
-                size (int): 新しく見つかったファイルのサイズ
-                created_at (datetime): 新しく見つかったファイルの作成日時
-                modified_at (datetime): 新しく見つかったファイルの更新日時
-
-            Returns:
-                bool: 移動として場所を付け替えた場合は True
-            """
-
-            file_name = Path(path).name
-
-            # すべての保存先から、ファイル名・サイズ・更新日時が同じ場所を候補として DB から探す
-            ## capture_files_name_size_modified_at のインデックスで引けるので、新しく見つかったパスごとに問い合わせても軽い
-            candidate_rows = await CaptureFile.filter(
-                file_name = file_name,
-                file_size = size,
-                file_modified_at = modified_at,
-            ).values('id', 'file_path')
-
-            for candidate_row in candidate_rows:
-                old_id: int = candidate_row['id']
-                old_path: str = candidate_row['file_path']
-                if CapturePathKey(old_path) == CapturePathKey(path):
-                    continue
-
-                # この走査ですでに見つかった場所は、古いパスにファイルがあるので候補から外す
-                if old_id <= max_file_id and seen_file_ids[old_id] == 1:
-                    continue
-
-                # 古いパスと新しいパスの両方のロックを、パスの順に取る (取る順を揃えてデッドロックを避ける)
-                async with AsyncExitStack() as stack:
-                    for locked_path in sorted((old_path, path), key=CapturePathKey):
-                        await stack.enter_async_context(self.getPathLock(locked_path))
-
-                    # 古いパスにまだファイルがあれば移動ではない (読めない場合も移動とは判定しない)
-                    try:
-                        await anyio.Path(old_path).stat()
-                        continue
-                    except FileNotFoundError:
-                        pass
-                    except OSError:
-                        continue
-
-                    # ロックを取るまでの間に、古い場所の行や新しいファイルが変わっていないかを確かめる
-                    current_file = await CaptureFile.get_or_none(id=old_id, file_path=old_path)
-                    if current_file is None:
-                        continue
-                    new_stat = await anyio.Path(path).stat()
-                    is_same_file = (
-                        current_file.file_size == size and
-                        current_file.file_modified_at == modified_at and
-                        new_stat.st_size == size and
-                        datetime.fromtimestamp(new_stat.st_mtime, JST) == modified_at
-                    )
-                    if is_same_file is False:
-                        continue
-
-                    # 新しいパスがまだ登録されていなければ、古い場所の行を新しいパスに付け替える
-                    is_moved = False
-                    async with InWriteTransaction():
-                        if not await CaptureFile.filter(file_path=path).exists():
-                            if current_file.capture_id is not None:
-                                moved_status = 'Available'
-                            else:
-                                moved_status = 'Invalid'
-                            await CaptureFile.filter(id=current_file.id).update(
-                                file_path = path,
-                                file_name = file_name,
-                                file_created_at = created_at,
-                                status = moved_status,
-                                missing_since = None,
-                            )
-                            # 付け替えた場所は、消えたファイルの候補から外す
-                            if old_id <= max_file_id:
-                                seen_file_ids[old_id] = 1
-                            is_moved = True
-
-                    if is_moved is True:
-                        self.invalidateSections()
-                        return True
-
-            return False
-
-
         # rglob は走査中の OSError を黙って捨てるので、フォルダを1つずつ列挙して、読めなかったフォルダを数える
         pending_folders = [anyio.Path(root)]
         while len(pending_folders) > 0:
@@ -1021,7 +1022,7 @@ class CaptureScanTask:
 
                         # 新しく見つかったパスは、まず別の場所からの移動かを照合する
                         else:
-                            is_moved = await MoveCaptureFile(path, size, created_at, modified_at)
+                            is_moved = await self.moveFile(path, size, created_at, modified_at, seen_file_ids)
                             if is_moved is True:
                                 return
 
@@ -1331,8 +1332,32 @@ class CaptureScanTask:
 
                             # 追加・変更された画像を登録する
                             for change, path in changes:
-                                if change != Change.deleted and Path(path).suffix.lower() in self.CAPTURE_EXTENSIONS:
-                                    await self.processFile(NormalizeCapturePath(path))
+                                if change == Change.deleted or Path(path).suffix.lower() not in self.CAPTURE_EXTENSIONS:
+                                    continue
+                                normalized_path = NormalizeCapturePath(path)
+
+                                # 追加されたパスは、一括スキャンと同じく、まず別の場所からの移動かを照合する
+                                ## 保存先の中での移動や名前の変更では、画像を読み直さずに同じ場所の行を付け替える
+                                if change == Change.added:
+                                    try:
+                                        file_stat = await anyio.Path(normalized_path).stat()
+                                        is_moved = await self.moveFile(
+                                            normalized_path,
+                                            file_stat.st_size,
+                                            datetime.fromtimestamp(file_stat.st_ctime, JST),
+                                            datetime.fromtimestamp(file_stat.st_mtime, JST),
+                                            bytearray(),
+                                        )
+                                    except FileNotFoundError:
+                                        continue
+                                    # 移動の照合の一時的な失敗は、画像を読み込んで登録する処理に任せる
+                                    except (OSError, OperationalError, IntegrityError) as ex:
+                                        logging.warning(f'Cannot check moved capture: {normalized_path}', exc_info=ex)
+                                        is_moved = False
+                                    if is_moved is True:
+                                        continue
+
+                                await self.processFile(normalized_path)
 
                             # 消えたファイルは、通信エラーと見分けるため、一括スキャンで全体を列挙してから確定する
                             ## フォルダごと移してきた画像は、フォルダの追加しか通知されないので、これも一括スキャンで登録する
