@@ -1086,8 +1086,20 @@ const requireLogin = () => {
     return true;
 };
 
+// 隣へ送るアニメーションの途中は、表示中のキャプチャが送る前のキャプチャのままなので、そのまま操作すると見ていないキャプチャに効いてしまう
+// 送っている途中に押された操作は、送りをすぐに完了させてから、送り先のキャプチャ (画面に見えているキャプチャ) を対象にする
+const finishSlideBeforeAction = async () => {
+    if (finishSlide !== null) {
+        await finishSlide();
+    }
+};
+
 const toggleFavorite = async () => {
     if (props.capture === null || !requireLogin()) {
+        return;
+    }
+    await finishSlideBeforeAction();
+    if (props.capture === null) {
         return;
     }
     // 応答を待つ間に隣のキャプチャへ送られても、お気に入りのボタンを押したキャプチャに結果を反映する
@@ -1105,13 +1117,15 @@ const toggleFavorite = async () => {
     }
 };
 
-const openTagDialog = () => {
+const openTagDialog = async () => {
     if (requireLogin()) {
+        await finishSlideBeforeAction();
         isTagDialogOpen.value = true;
     }
 };
 // 表示しているキャプチャを、保存先にあるファイル名でブラウザのダウンロードフォルダへ保存する
 const download = async () => {
+    await finishSlideBeforeAction();
     if (props.capture !== null) {
         await Captures.downloadImages([props.capture]);
     }
@@ -1293,7 +1307,7 @@ const onKeyDown = (event: KeyboardEvent) => {
         case ' ': void close(); break;
         case 'Delete': requestDelete(); break;
         case 'f': case 'F': void toggleFavorite(); break;
-        case 't': case 'T': openTagDialog(); break;
+        case 't': case 'T': void openTagDialog(); break;
         case 'd': case 'D': void download(); break;
         case 'i': case 'I': setInfoOpen(!isInfoOpen.value); break;
         default: return;
