@@ -146,6 +146,7 @@ class CaptureFileSnapshot(TypedDict):
     file_created_at: datetime
     file_modified_at: datetime
     status: Literal['Available', 'Missing', 'Invalid']
+    missing_since: datetime | None
 
 
 @dataclass(slots=True)
@@ -994,6 +995,7 @@ class CaptureScanTask:
                     'file_created_at',
                     'file_modified_at',
                     'status',
+                    'missing_since',
                 )
                 known_files: dict[str, CaptureFileSnapshot] = {}
                 for known_row in cast(list[CaptureFileSnapshot], known_rows):
@@ -1077,8 +1079,17 @@ class CaptureScanTask:
             return False
 
         scan_started_at = result.started_at
+        expired_before = scan_started_at - timedelta(days=7)
         async for snapshot in self.iterateUnseenFiles(result):
             path = snapshot['file_path']
+
+            # すでに Missing の場所は、期限による削除を行えて1週間たったときだけ確定し直す
+            ## 期限前の場所まで毎回確定し直すと、外でファイルが消されるたびの一括スキャンで、保留中の場所の数だけ書き込みが走ってしまう
+            if snapshot['status'] == 'Missing':
+                is_expired = snapshot['missing_since'] is not None and snapshot['missing_since'] <= expired_before
+                if can_delete_expired is False or is_expired is False:
+                    continue
+
             async with self.getPathLock(path):
 
                 # 走査のあとで同じパスに戻ってきていれば、消えていないので何もしない (読めない場合も確定しない)
@@ -1125,7 +1136,7 @@ class CaptureScanTask:
                             status = 'Missing',
                             missing_since = scan_started_at,
                         )
-                    elif can_delete_expired is True and current_file.missing_since <= scan_started_at - timedelta(days=7):
+                    elif can_delete_expired is True and current_file.missing_since <= expired_before:
                         await current_file.delete()
                         # 場所が1つも残っていないキャプチャも一緒に削除する
                         if capture is not None and not await CaptureFile.filter(capture_id=capture.id).exists():
@@ -1162,6 +1173,7 @@ class CaptureScanTask:
                 'file_created_at',
                 'file_modified_at',
                 'status',
+                'missing_since',
             )
             if len(rows) == 0:
                 break
