@@ -26,6 +26,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.security import OAuth2PasswordBearer
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ValidationError
 from tortoise import connections
@@ -809,14 +810,28 @@ async def CapturesAPI(
 )
 async def CaptureUploadAPI(
     image: Annotated[UploadFile, File(description='アップロードするキャプチャ画像 (JPEG or PNG)。')],
-    user: Annotated[User | None, Depends(GetOptionalCurrentUser)],
+    token: Annotated[str | None, Depends(OAuth2PasswordBearer(tokenUrl='users/token', auto_error=False))],
     file_modified_at: Annotated[float | None, Form(allow_inf_nan=False, description='元のファイルの更新日時 (UNIX 時間のミリ秒) 。手元のファイルをアップロードするときに指定する。')] = None,
 ):
     """
     クライアント側でキャプチャした画像や手元の画像をサーバーにアップロードする。<br>
     アップロードされた画像は、サーバー設定で指定されたフォルダに保存し、その場でキャプチャとして登録する。<br>
-    同じ内容のキャプチャが既に保存されている場合は、保存せずにそのキャプチャを返す。
+    同じ内容のキャプチャが既に保存されている場合は、保存せずにそのキャプチャを返す。<br>
+    アクセストークンが期限切れなどで無効な場合も、ログインしていない場合と同じく保存する。
     """
+
+    # ログインしている場合だけ、返すキャプチャにお気に入りとタグを含めるためにユーザーを取得する
+    ## キャプチャはユーザーごとに区別せずに保存するので、ユーザーは保存そのものには使わない
+    ## 視聴中にアクセストークンの期限が切れたりアカウントが削除されたりしても、撮影したキャプチャを失わないよう、
+    ## 無効なアクセストークンはエラーにせず、ログインしていない場合と同じく扱う
+    user: User | None = None
+    if token is not None:
+        try:
+            user = await GetCurrentUser(token)
+        except HTTPException as ex:
+            if ex.status_code != status.HTTP_401_UNAUTHORIZED:
+                raise
+            logging.warning('[CapturesRouter][CaptureUploadAPI] Invalid access token was sent. Saving the capture as a logged-out user.')
 
     # アップロードされた画像を読み込む
     ## 上限を超える巨大なファイルをメモリに載せないよう、上限より 1 バイトだけ多く読み込み、上限を超えていたらエラーにする
