@@ -404,6 +404,8 @@ onMounted(() => {
         resizeObserver.observe(rootRef.value);
         containerWidth.value = rootRef.value.clientWidth;
     }
+    // ログインが必要な画面との行き来で作り直されたときも、読み込み終えるまで前の一覧の件数を出さずに読み込み中にする
+    emit('reloading');
     void reload();
 });
 onBeforeUnmount(() => {

@@ -324,10 +324,11 @@ const loadTagName = async () => {
 watch(tagId, loadTagName);
 
 // 別の種類のタイムラインへ移ったら、選択と拡大表示を閉じる
+// 読み込み中の表示は、絞り込みが変わってタイムラインが読み込み直すとき (reloading) に切り替わる
+// 「お気に入りのみ」で絞り込んだタイムラインからお気に入りのタブへ移ったときのように、絞り込みが同じなら読み込み直さずに今の一覧を表示し続ける
 watch(() => route.path, () => {
     selection.clear();
     openedCapture.value = null;
-    isLoaded.value = false;
 });
 
 onMounted(async () => {
