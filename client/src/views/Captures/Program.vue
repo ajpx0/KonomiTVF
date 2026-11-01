@@ -68,7 +68,7 @@
             </div>
         </div>
 
-        <CaptureShortcutDialog v-model:show="isShortcutDialogOpen" />
+        <CaptureShortcutDialog v-model:show="isShortcutDialogOpen" select-all-scope="Program" />
         <CaptureSelectionBar ref="selectionBarRef" :selection="selection" @updated="onUpdated" @deleted="onDeleted" />
         <CaptureLightbox :capture="openedCapture" :program-hint="program" :navigate="navigate" :reveal="reveal"
             @update:capture="onLightboxCaptureChange" @updated="onUpdated([$event])" @deleted="onDeleted" />

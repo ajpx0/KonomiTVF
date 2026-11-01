@@ -40,7 +40,7 @@
 </template>
 <script lang="ts" setup>
 
-import { onBeforeUnmount, onMounted } from 'vue';
+import { computed, onBeforeUnmount, onMounted } from 'vue';
 
 import Utils from '@/utils';
 
@@ -57,9 +57,13 @@ interface IShortcut {
     alternatives: IShortcutKey[][];
 }
 
-defineProps<{
+const props = withDefaults(defineProps<{
     show: boolean;
-}>();
+    // Ctrl (Command) + A キーで選ぶ範囲 (タイムラインでは同じ日付のキャプチャ、番組別の一覧ではその番組のキャプチャすべて)
+    selectAllScope?: 'Day' | 'Program';
+}>(), {
+    selectAllScope: 'Day',
+});
 
 const emit = defineEmits<{
     (event: 'update:show', show: boolean): void;
@@ -88,7 +92,7 @@ const RIGHT_KEY: IShortcutKey = {name: 'fluent:arrow-right-12-filled', icon: tru
 // Mac のキーボードには Delete キーがないため、Finder と同じく Command+Backspace でも削除できる
 const DELETE_KEYS: IShortcutKey[][] = [[{name: 'Delete', icon: false}], [{name: 'Cmd', icon: false}, {name: 'Backspace', icon: false}]];
 
-const shortcutGroups: { name: string; icon: string; shortcuts: IShortcut[] }[] = [
+const shortcutGroups = computed<{ name: string; icon: string; shortcuts: IShortcut[] }[]>(() => [
     {
         name: 'キャプチャを選択しているとき',
         icon: 'fluent:checkmark-circle-20-filled',
@@ -98,7 +102,10 @@ const shortcutGroups: { name: string; icon: string; shortcuts: IShortcut[] }[] =
             { name: '選択を変更せずにカーソルを移動する', alternatives: [[{name: 'Ctrl', icon: false}, ARROW_KEYS]] },
             { name: 'カーソルの位置のキャプチャを選択する / 外す', alternatives: [[{name: 'Ctrl', icon: false}, {name: 'Space', icon: false}]] },
             { name: '選択しているキャプチャを拡大表示する', alternatives: [[{name: 'Space', icon: false}], [{name: 'Enter', icon: false}]] },
-            { name: '同じ日付のキャプチャをすべて選択する', alternatives: [[{name: Utils.CtrlOrCmd(), icon: false}, {name: 'A', icon: false}]] },
+            {
+                name: props.selectAllScope === 'Program' ? 'この番組のキャプチャをすべて選択する' : '同じ日付のキャプチャをすべて選択する',
+                alternatives: [[{name: Utils.CtrlOrCmd(), icon: false}, {name: 'A', icon: false}]],
+            },
             { name: '選択しているキャプチャをお気に入りに追加する / 外す', alternatives: [[{name: 'F', icon: false}]] },
             { name: '選択しているキャプチャにタグを付ける', alternatives: [[{name: 'T', icon: false}]] },
             { name: '選択しているキャプチャをダウンロードする (50枚まで)', alternatives: [[{name: 'D', icon: false}]] },
@@ -127,7 +134,7 @@ const shortcutGroups: { name: string; icon: string; shortcuts: IShortcut[] }[] =
             { name: 'キーボードショートカットの一覧を表示する', alternatives: [[{name: '／(？)', icon: false}]] },
         ],
     },
-];
+]);
 
 </script>
 <style lang="scss" scoped>
