@@ -831,6 +831,10 @@ async def CaptureUploadAPI(
             detail = 'Specified filename is invalid',
         )
 
+    # macOS などでは使えても Windows のファイル名には使えない文字は、_ に置き換えて保存する
+    ## 置き換えないと、Windows で動くサーバーや Windows の共有フォルダの保存先では、ファイルを作れずに保存に失敗する
+    filename = re.sub(r'[<>"|?*\x01-\x1f]', '_', filename)
+
     # キャプチャは JPEG か PNG の画像なので、拡張子が .jpg / .jpeg / .png 以外のファイル名はエラーにする
     ## JPEG は末尾に任意のデータを付けても画像として読めるため、中身の検査だけでは .bat のような実行できるファイルとしても保存できてしまう
     if filename.lower().endswith(('.jpg', '.jpeg', '.png')) is False:
