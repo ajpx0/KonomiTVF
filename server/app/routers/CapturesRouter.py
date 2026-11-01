@@ -585,7 +585,7 @@ async def SerializePrograms(ids: list[int]) -> list[schemas.CaptureProgram]:
     return programs
 
 
-async def GetProgramAlbum(program: schemas.CaptureProgram, user: User | None) -> schemas.CaptureProgramAlbum:
+async def GetProgramAlbum(program: schemas.CaptureProgram, user: User | None) -> schemas.CaptureProgramAlbum | None:
     """
     放送回のアルバム (利用できるキャプチャの枚数と代表のキャプチャ) を作る
 
@@ -594,7 +594,7 @@ async def GetProgramAlbum(program: schemas.CaptureProgram, user: User | None) ->
         user (User | None): 閲覧しているユーザー
 
     Returns:
-        schemas.CaptureProgramAlbum: 放送回のアルバム
+        schemas.CaptureProgramAlbum | None: 放送回のアルバム (利用できるキャプチャが1枚もない場合は None)
     """
 
     conn = connections.get('default')
@@ -607,10 +607,7 @@ async def GetProgramAlbum(program: schemas.CaptureProgram, user: User | None) ->
     """, [program.id])
     stats = stats_rows[0]
     if stats['count'] == 0:
-        raise HTTPException(
-            status_code = status.HTTP_404_NOT_FOUND,
-            detail = 'Capture program not found',
-        )
+        return None
 
     # 再生位置のあるキャプチャを先に並べ、その真ん中あたりを代表のキャプチャにする
     positioned_rows = await conn.execute_query_dict(f"""
@@ -626,6 +623,10 @@ async def GetProgramAlbum(program: schemas.CaptureProgram, user: User | None) ->
         ORDER BY (c.playback_position IS NULL), c.playback_position, c.captured_at, c.id
         LIMIT 1 OFFSET ?
     """, [program.id, cover_offset])
+
+    # 枚数を数えてから代表のキャプチャを取得するまでの間に、最後の1枚が削除されたときも、利用できるキャプチャがないものとして扱う
+    if len(cover_rows) == 0:
+        return None
     cover_capture = (await SerializeCaptures(cover_rows, user))[0]
 
     return schemas.CaptureProgramAlbum(
@@ -1178,7 +1179,12 @@ async def CaptureProgramsAPI(
     # 放送回ごとにアルバム (枚数・撮影期間・代表のキャプチャ) を作る
     ids = [row['id'] for row in rows[:limit]]
     programs_by_id = {program.id: program for program in await SerializePrograms(ids)}
-    albums = [await GetProgramAlbum(programs_by_id[id], user) for id in ids]
+    ## 一覧を取得してからアルバムを作るまでの間に、キャプチャがすべて削除された放送回は一覧から外す
+    albums: list[schemas.CaptureProgramAlbum] = []
+    for id in ids:
+        album = await GetProgramAlbum(programs_by_id[id], user)
+        if album is not None:
+            albums.append(album)
     return schemas.CapturePrograms(programs=albums, next_cursor=next_cursor)
 
 
@@ -1200,13 +1206,17 @@ async def CaptureProgramAPI(
     # 代表のキャプチャに本人のお気に入りとタグの状態を含むので、共有のキャッシュに入れさせない
     response.headers['Cache-Control'] = 'private, no-store'
 
+    # 放送回がないときと、利用できるキャプチャが1枚もないときは、どちらも見つからないものとして扱う
     programs = await SerializePrograms([capture_program_id])
-    if len(programs) == 0:
+    album = None
+    if len(programs) > 0:
+        album = await GetProgramAlbum(programs[0], user)
+    if album is None:
         raise HTTPException(
             status_code = status.HTTP_404_NOT_FOUND,
             detail = 'Capture program not found',
         )
-    return await GetProgramAlbum(programs[0], user)
+    return album
 
 
 @router.get(
