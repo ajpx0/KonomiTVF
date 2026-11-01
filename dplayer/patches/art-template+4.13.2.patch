@@ -1,0 +1,13 @@
+diff --git a/node_modules/art-template/lib/precompile.js b/node_modules/art-template/lib/precompile.js
+index 52615a7..385f680 100644
+--- a/node_modules/art-template/lib/precompile.js
++++ b/node_modules/art-template/lib/precompile.js
+@@ -100,7 +100,7 @@ var precompile = function precompile() {
+     }
+ 
+     var isLocalModule = LOCAL_MODULE.test(imports);
+-    var tplImportsPath = isLocalModule ? imports : path.relative(path.dirname(options.filename), imports);
++    var tplImportsPath = isLocalModule ? imports : path.relative(path.dirname(options.filename), imports).split(path.sep).join('/');
+     var fn = compile(options);
+ 
+     code = '(' + fn.toString() + ')';
