@@ -15,8 +15,18 @@
             </v-btn>
         </div>
         <template v-else>
+            <!-- 削除済みのタグの URL などで開いたときは、読み込みの失敗ではなく、タグが存在しないことを伝えてタグの一覧へ案内する -->
+            <div v-if="isTagMissing" class="capture-empty">
+                <Icon class="capture-empty__icon" icon="fluent:tag-dismiss-20-regular" width="54px" height="54px" />
+                <div class="capture-empty__message">このタグは存在しません。</div>
+                <div class="capture-empty__sub">タグが削除されたか、別のアカウントのタグです。<br class="d-sm-none">タグの一覧から、表示するタグを選び直してください。</div>
+                <v-btn class="mt-6 px-4" color="secondary" variant="flat" height="40" to="/captures/tags/">
+                    <Icon icon="fluent:tag-multiple-20-regular" width="18px" height="18px" />
+                    <span class="ml-1">タグの一覧へ戻る</span>
+                </v-btn>
+            </div>
             <!-- 読み込み中は、ほかのキャプチャの画面と同じく見出しより下の領域の中央にスピナーを表示する -->
-            <div v-if="!isLoaded" class="capture-loading">
+            <div v-else-if="!isLoaded || isTagLoading" class="capture-loading">
                 <Icon icon="line-md:loading-twotone-loop" width="48px" height="48px" />
             </div>
             <div v-else-if="isLoadFailed" class="capture-empty">
@@ -313,12 +323,30 @@ const onDeleted = (capture_ids: number[]) => {
     void timelineRef.value?.reload();
 };
 
-// タグの画面では、見出しに出すタグの名前を取る
+// タグの画面では、見出しに出すタグの名前を取り、タグが存在するかを確認する
+// タグの一覧を読み込めなかったときは、存在しないとは判断せず、タイムラインの読み込みの結果を表示する
+const isTagMissing = ref(false);
+// タグが存在するかを確認している間は、存在しないタグで絞り込んだ読み込みの失敗を表示せずに、読み込み中にする
+// (タグの画面を開いた直後は、ログイン状態を確認し終えて確認を始めるまでの間も読み込み中にする)
+const isTagLoading = ref(mode.value === 'Tag');
 const loadTagName = async () => {
     tagName.value = null;
+    isTagMissing.value = false;
+    isTagLoading.value = false;
     if (mode.value === 'Tag' && isLoggedIn.value) {
+        const myTagId = tagId.value;
+        isTagLoading.value = true;
         const tags = await Captures.fetchTags();
-        tagName.value = tags?.find(tag => tag.id === tagId.value)?.name ?? null;
+        // 確認している間に別のタグへ移ったときは、移った先のタグの確認の結果だけを反映する
+        if (myTagId !== tagId.value) {
+            return;
+        }
+        isTagLoading.value = false;
+        if (tags !== null) {
+            const tag = tags.find(item => item.id === myTagId);
+            tagName.value = tag?.name ?? null;
+            isTagMissing.value = tag === undefined;
+        }
     }
 };
 watch(tagId, loadTagName);

@@ -385,7 +385,10 @@ class Captures {
             },
         });
         if (response.type === 'error') {
-            APIClient.showGenericError(response, 'キャプチャの日付ごとの件数を取得できませんでした。');
+            // 削除済みのタグで絞り込んだときは、タグの画面がタグが存在しないことを案内するので、エラーの通知は表示しない
+            if (response.data.detail !== 'Capture tag not found') {
+                APIClient.showGenericError(response, 'キャプチャの日付ごとの件数を取得できませんでした。');
+            }
             return null;
         }
         return response.data;
