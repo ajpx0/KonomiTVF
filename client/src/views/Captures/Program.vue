@@ -278,9 +278,11 @@ useCaptureKeyboard({
 });
 
 // 削除したキャプチャは、取り直しを待たずに一覧から外す (取り直しの間に1枚表示が削除したキャプチャを隣として拾わないため)
+// 選択からも外し、拡大表示で削除したキャプチャも、その後の一括の操作の対象から除く (タイムラインと同じ)
 const onDeleted = (deletedIds: number[]) => {
     const ids = new Set(deletedIds);
     captures.value = captures.value.filter(capture => !ids.has(capture.id));
+    selection.setMany([...selection.selected.value.values()].filter(capture => ids.has(capture.id)), false);
     void load();
 };
 const onUpdated = (updated: ICapture[]) => {
@@ -289,6 +291,9 @@ const onUpdated = (updated: ICapture[]) => {
     if (openedCapture.value !== null && byId.has(openedCapture.value.id)) {
         openedCapture.value = byId.get(openedCapture.value.id)!;
     }
+    // 選択が持っている内容も、まだ選ばれているキャプチャの分だけ新しい状態に差し替える (タイムラインと同じ)
+    // 拡大表示でお気に入りを変えて閉じたあとに F キーを押したとき、変えたあとの状態から切り替えるため
+    selection.setMany(updated.filter(capture => selection.isSelected(capture)), true);
 };
 
 onMounted(async () => {
