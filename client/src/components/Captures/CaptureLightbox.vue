@@ -1,7 +1,7 @@
 <template>
     <Teleport to="body">
-        <!-- View Transitions API で開閉するときは、フェードも View Transition で行うので、Vue のトランジションは使わない -->
-        <transition name="capture-lightbox-fade" :css="!canUseViewTransition()">
+        <!-- 暗幕・ボタン・情報欄はフェードで開閉し、画像だけはタイルとの間を拡大・縮小していく (CaptureTransition.ts を参照) -->
+        <transition name="capture-lightbox-fade">
             <div v-if="capture !== null" ref="rootRef" class="capture-lightbox" tabindex="-1"
                 :class="{
                     'capture-lightbox--portrait': isPortrait,
@@ -179,7 +179,7 @@ import { useRouter } from 'vue-router';
 
 import CaptureInfo from '@/components/Captures/CaptureInfo.vue';
 import CaptureTagDialog from '@/components/Captures/CaptureTagDialog.vue';
-import { canUseViewTransition, findTileImage } from '@/components/Captures/CaptureTransition';
+import { canAnimateCaptureImage, findTileImage, flyCaptureImage } from '@/components/Captures/CaptureTransition';
 import Message from '@/message';
 import Captures, { ICapture, ICaptureDetail, ICaptureProgram, ICaptureTag } from '@/services/Captures';
 import Videos from '@/services/Videos';
@@ -343,7 +343,7 @@ const slides = computed(() => {
 
 
 // 画像の表示の大きさは、読み込みを待たずにキャプチャの縦横の大きさから決める
-// 読み込む前の画像は大きさを持たず、開くときの View Transition が拡大していく先の位置と大きさを決められないため
+// 読み込む前の画像は大きさを持たず、開くときにタイルの画像が拡大していく先の位置と大きさを決められないため
 const getImageSizeStyle = (capture: ICapture) => ({
     width: `min(100cqw, calc(100cqh * ${capture.image_width} / ${capture.image_height}))`,
     aspectRatio: `${capture.image_width} / ${capture.image_height}`,
@@ -368,15 +368,15 @@ const trackStyle = computed(() => ({
 const backdropOpacity = computed(() => Math.max(0, 1 - Math.abs(dismissY.value) / 500));
 
 // 閉じるときは、開くときの逆に、1枚表示の画像が一覧のタイルの位置まで縮んでいくように見せる
-// 一覧のタイルを先に画面に見える位置までスクロールさせてから、View Transitions API で2つの画像の位置と大きさをつなぐ
+// 一覧のタイルを先に画面に見える位置までスクロールさせてから、画像の複製を1枚だけタイルの位置まで動かし、暗幕・ボタン・情報欄は同時にフェードアウトさせる
 let isClosing = false;
 const close = async () => {
     const current = props.capture;
     if (current === null || isClosing) {
         return;
     }
-    // 対応していないブラウザと、動きを減らす設定のときは、そのまま閉じる
-    if (document.startViewTransition === undefined || canUseViewTransition() === false) {
+    // 動きを減らす設定のときは、フェードだけで閉じる
+    if (canAnimateCaptureImage() === false) {
         emit('update:capture', null);
         return;
     }
@@ -387,26 +387,28 @@ const close = async () => {
         await nextTick();
     }
     await props.reveal?.(current);
-    let tileImage: HTMLImageElement | null = null;
-    // 画面全体ではなく、縮んでいく画像と拡大表示だけを撮らせる (下のスタイルを参照)
-    document.documentElement.classList.add('capture-lightbox-transition');
-    const transition = document.startViewTransition(async () => {
-        // 閉じた後の画面では、名前を戻る先のタイルの画像へ渡す
-        // 選択の枠・チェック・アイコンは画像の上に重なるので、縮み終わってからフェードインさせる (CaptureTile.vue の capture-tile--landing)
-        emit('update:capture', null);
-        await nextTick();
-        tileImage = findTileImage(current.id);
-        tileImage?.style.setProperty('view-transition-name', 'capture-lightbox-image');
-        tileImage?.closest('.capture-tile')?.classList.add('capture-tile--landing');
-    });
-    try {
-        await transition.finished;
-    } finally {
-        (tileImage as HTMLImageElement | null)?.style.removeProperty('view-transition-name');
-        (tileImage as HTMLImageElement | null)?.closest('.capture-tile')?.classList.remove('capture-tile--landing');
-        document.documentElement.classList.remove('capture-lightbox-transition');
-        isClosing = false;
+
+    // 戻る先のタイルが画面に見えているときだけ、画像をタイルの位置まで縮めていく (見えていなければフェードだけで閉じる)
+    const image = rootRef.value?.querySelector<HTMLImageElement>('.capture-lightbox__image--current') ?? null;
+    const tileImage = findTileImage(current.id);
+    const tileRect = tileImage?.getBoundingClientRect();
+    let flight: ReturnType<typeof flyCaptureImage> | null = null;
+    if (image !== null && tileImage !== null && tileRect !== undefined && tileRect.bottom > 0 && tileRect.top < window.innerHeight) {
+        flight = flyCaptureImage(image.currentSrc || image.src, image.getBoundingClientRect(), tileRect);
+        // 縮んでいく間は、フェードアウトしていく拡大表示の画像とタイルの画像を隠し、複製の1枚だけを見せる
+        // 選択の枠・チェック・アイコンは画像の上に重なるので、縮み終わってから表示する (CaptureTile.vue の capture-tile--landing)
+        image.style.visibility = 'hidden';
+        tileImage.style.visibility = 'hidden';
+        tileImage.closest('.capture-tile')?.classList.add('capture-tile--landing');
     }
+    emit('update:capture', null);
+    if (flight !== null && tileImage !== null) {
+        await flight.finished;
+        tileImage.style.removeProperty('visibility');
+        tileImage.closest('.capture-tile')?.classList.remove('capture-tile--landing');
+        flight.element.remove();
+    }
+    isClosing = false;
 };
 
 // 前後へ送る (矢印キー・矢印ボタン・スワイプで共通)
@@ -1656,44 +1658,16 @@ onBeforeUnmount(() => {
 </style>
 <style lang="scss">
 
-// 一覧のタイルから開いたときに、タイルの画像から拡大していく表示中の画像 (CaptureTile.vue の openWithTransition() を参照)
-// View Transitions API の疑似要素は文書の最上位にできるので、スコープなしのスタイルで指定する
-.capture-lightbox__image--current {
-    view-transition-name: capture-lightbox-image;
-}
-// 拡大表示を開閉するときは、画面全体のスナップショットを撮らずに、タイルと1枚表示をつなぐ画像と、拡大表示 (暗幕・ボタン・情報欄) だけを撮らせる
-// 一覧の画面全体を撮って重ねると、多数の画像を描き直すぶん動き出すまでに時間がかかるため
-// 拡大表示は、画像の拡大・縮小と同じ時間でフェードイン・フェードアウトさせ、その下には一覧の画面がそのまま見える
-html.capture-lightbox-transition {
-    view-transition-name: none;
-    .capture-lightbox {
-        view-transition-name: capture-lightbox-ui;
-    }
-}
-::view-transition-old(capture-lightbox-ui),
-::view-transition-new(capture-lightbox-ui) {
-    animation-duration: 0.2s;
-    animation-timing-function: ease;
-}
-// 開くときは、拡大表示より後から撮られる拡大していく画像が、拡大表示の下に隠れないよう前に出す
-::view-transition-group(capture-lightbox-image) {
-    z-index: 1;
-}
-::view-transition-group(capture-lightbox-image) {
-    animation-duration: 0.2s;
-    animation-timing-function: cubic-bezier(0.26, 0.68, 0.55, 0.99);
-}
-// 開くときは、タイルの画像のスナップショットをフェードさせずに下に敷いたまま拡大し、
-// 原寸の画像はデコードが終わって描画された時点で上に重ねて表示する (CaptureTransition.ts の openWithTransition() を参照)
-html.capture-lightbox-opening::view-transition-old(capture-lightbox-image),
-html.capture-lightbox-opening::view-transition-new(capture-lightbox-image) {
-    animation: none;
-}
-::view-transition-old(capture-lightbox-image),
-::view-transition-new(capture-lightbox-image) {
+// 拡大表示の開閉で、タイルと1枚表示の間を拡大・縮小していく画像の複製 (CaptureTransition.ts の flyCaptureImage() を参照)
+// body の直下に置くので、スコープなしのスタイルで指定する
+// 拡大表示 (2300) より前、拡大表示の中で開くダイアログ (2400) より後ろに重ねる
+.capture-flying-image {
+    position: fixed;
+    z-index: 2350;
+    margin: 0;
     // タイルは画像を切り抜いて並べているので、縦横比の違いで画像が伸び縮みしないよう、切り抜いたまま重ねる
-    height: 100%;
     object-fit: cover;
+    pointer-events: none;
 }
 
 </style>
