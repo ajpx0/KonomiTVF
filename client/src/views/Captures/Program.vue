@@ -77,7 +77,7 @@
 <script lang="ts" setup>
 
 import { computed, onMounted, ref, watch } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 
 import { CaptureKeyboardDirection, useCaptureKeyboard } from '@/components/Captures/CaptureKeyboard';
 import CaptureLightbox from '@/components/Captures/CaptureLightbox.vue';
@@ -94,6 +94,7 @@ import { ProgramUtils } from '@/utils';
 
 
 const route = useRoute();
+const router = useRouter();
 const userStore = useUserStore();
 const selection = useCaptureSelection();
 // Shift キーを押しながらマウスを乗せたときに、クリックで選ばれる範囲を示す
@@ -104,7 +105,22 @@ const captures = ref<ICapture[]>([]);
 const isLoading = ref(true);
 // 読み込みに失敗したか (0件と区別して、読み込めなかったことを伝えるため)
 const isLoadFailed = ref(false);
-const order = ref<CaptureSortOrder>('PlaybackPosition');
+// 並び順は番組別の一覧と同じく URL のクエリパラメータに保持し、録画の再生から戻ったときも同じ並びで表示する
+// (並びが変わると、戻ったスクロール位置に別の場面のキャプチャが表示されるため)
+const order = computed<CaptureSortOrder>({
+    get: () => {
+        if (route.query.order === 'CapturedAtDesc') {
+            return 'CapturedAtDesc';
+        }
+        if (route.query.order === 'CapturedAtAsc') {
+            return 'CapturedAtAsc';
+        }
+        return 'PlaybackPosition';
+    },
+    set: (value) => {
+        void router.replace({ query: { ...route.query, order: value === 'PlaybackPosition' ? undefined : value } });
+    },
+});
 const openedCapture = ref<ICapture | null>(null);
 
 // どの入口から来たかで、絞り込みの条件を変える
@@ -196,7 +212,9 @@ const fetchFallbackProgram = async (): Promise<ICaptureProgram | null> => {
     return hint ?? null;
 };
 watch(order, load);
-watch(() => route.fullPath, () => {
+// 別の番組へ移ったときは、選択と拡大表示を閉じて読み込み直す
+// 並び順だけを変えたときは URL のクエリも変わるが、同じ番組のキャプチャなので選択は保ち、読み込み直しは並び順の watch に任せる
+watch(() => JSON.stringify(filter.value), () => {
     selection.clear();
     openedCapture.value = null;
     void load();
