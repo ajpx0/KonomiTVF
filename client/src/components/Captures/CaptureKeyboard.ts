@@ -113,6 +113,11 @@ export function useCaptureKeyboard(options: {
                 if (isCtrlOrCmd || event.altKey || event.shiftKey) {
                     return;
                 }
+                // タブやボタンなどの操作できる要素にフォーカスがあるときは、その要素を押す既定の動作に任せる
+                if (event.target instanceof Element &&
+                    event.target.closest('button, a[href], select, summary, [role="button"], [role="tab"], [role="link"], [role="menuitem"], [role="option"], [role="checkbox"], [role="switch"]') !== null) {
+                    return;
+                }
                 openWithTransition(findTileImage(cursor.id), () => options.open(cursor));
                 break;
             }
