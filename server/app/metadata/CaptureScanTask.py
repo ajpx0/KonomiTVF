@@ -688,6 +688,9 @@ class CaptureScanTask:
             try:
                 await self.registerFile(path)
                 return True
+            # 見つけたあとで消されたファイルは、登録するものがないので失敗として数えない (消えたことは次の一括スキャンで確定する)
+            except FileNotFoundError:
+                return True
             # 読み込みや DB の一時的な失敗 (読んでいる間の書き換えを含む) は、1件の失敗として次のファイルへ進む
             ## 画像として読めないファイルは registerFile() の中で Invalid として登録しているので、ここに来るのは外の世界の失敗だけにする
             ## AttributeError や TypeError のような実装側の誤りは、全件で同じく起きるので受け止めずに呼び出し元へ伝える
@@ -1030,6 +1033,10 @@ class CaptureScanTask:
 
                         if await self.processFile(path) is False:
                             is_complete = False
+
+                    # 一覧を取ったあとで消されたファイルは、消えたファイルとして次の走査で確定するので、この保存先の走査は不完全にしない
+                    except FileNotFoundError:
+                        pass
 
                     # 移動の照合の読み込みや DB の一時的な失敗は、この保存先の走査を不完全として扱い、消えたファイルの確定を見送る
                     ## 実装側の誤りは受け止めずに一括スキャンの呼び出し元へ伝える
