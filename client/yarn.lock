@@ -2274,9 +2274,8 @@ doctrine@^3.0.0:
   dependencies:
     esutils "^2.0.2"
 
-"dplayer@github:AariyJP/DPlayerF#main":
-  version "2026.10.4-AariyJP"
-  resolved "https://codeload.github.com/AariyJP/DPlayerF/tar.gz/193d08fdbc42837b4e8e77837523f8549a403696"
+"dplayer@file:../dplayer":
+  version "2026.10.10"
   dependencies:
     aribb24.js "~1.11.5"
     axios "^1.7.2"

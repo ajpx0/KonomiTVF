@@ -23,7 +23,7 @@ from Utils import CreateTable, CustomPrompt, GetNetworkDriveList, ShowPanel
 
 
 # インストール or アップデート対象の KonomiTV バージョン
-TARGET_VERSION = '2026.10.27'
+TARGET_VERSION = '2026.11.1'
 
 def ShowHeader():
     print(Padding(Rule(

@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends aria2 ca-certif
 ## サードパーティーライブラリは変更が少ないので、先にダウンロード処理を実行してビルドキャッシュを効かせる
 WORKDIR /
 ## リリース版用
-RUN aria2c -x10 https://github.com/AariyJP/KonomiTVF/releases/download/v2026.10.27/thirdparty-linux.tar.xz
+RUN aria2c -x10 https://github.com/ajpx0/KonomiTVF/releases/download/v2026.11.1/thirdparty-linux.tar.xz
 RUN tar xvf thirdparty-linux.tar.xz
 ## 開発版 (0.xx.x-dev) 用
 # RUN aria2c -x10 https://nightly.link/tsukumijima/KonomiTV/actions/runs/38878639663/thirdparty-linux.tar.xz.zip
@@ -30,6 +30,16 @@ RUN tar xvf thirdparty-linux.tar.xz
 # --------------------------------------------------------------------------------------------------------------
 
 FROM node:20.16.0 AS client-builder
+
+# クライアントが file:../dplayer で参照する DPlayer を先にビルド
+## dplayer/dist/ は Git 管理外のため、クライアントの依存パッケージをインストールする前に生成しておく
+WORKDIR /code/dplayer/
+COPY ./dplayer/package.json ./dplayer/package-lock.json /code/dplayer/
+COPY ./dplayer/patches/ /code/dplayer/patches/
+RUN npm ci
+COPY ./dplayer/ /code/dplayer/
+## file: 参照の依存パッケージは node_modules ごとクライアント側にコピーされ、DPlayer の型定義が dplayer/ 側の古い mpeg2toh264 を参照してしまうため、ビルド後に削除する
+RUN npm run build && rm -rf node_modules/
 
 # 依存パッケージリスト (package.json/yarn.lock) だけをコピー
 WORKDIR /code/client/

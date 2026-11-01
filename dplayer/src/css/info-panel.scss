@@ -1,0 +1,72 @@
+.dplayer-info-panel {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    width: 530px;
+    max-height: calc(100% - 40px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    background: rgba(28, 28, 28, 0.8);
+    padding: 10px;
+    color: #fff;
+    font-size: 12px;
+    border-radius: 2px;
+
+    &-hide {
+        display: none;
+    }
+
+    .dplayer-info-panel-mpeg2toh264-hide {
+        display: none;
+    }
+
+    .dplayer-info-panel-heading {
+        margin: 6px 0 4px;
+        padding-top: 6px;
+        border-top: 1px solid rgba(255, 255, 255, 0.25);
+        font-weight: bold;
+    }
+
+    .dplayer-info-panel-close {
+        cursor: pointer;
+        position: absolute;
+        right: 10px;
+        top: 10px;
+    }
+
+    .dplayer-info-panel-item {
+        & > span {
+            display: inline-block;
+            vertical-align: middle;
+            line-height: 15px;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            overflow: hidden;
+        }
+    }
+
+    .dplayer-info-panel-item-hide {
+        display: none;
+    }
+
+    .dplayer-info-panel-item-title {
+        width: 110px;
+        text-align: right;
+        margin-right: 10px;
+    }
+
+    .dplayer-info-panel-item-data {
+        width: 390px;
+    }
+
+    .dplayer-info-panel-mpeg2toh264 .dplayer-info-panel-item-data {
+        white-space: normal;
+    }
+
+    .dplayer-info-panel-conversion-chart {
+        display: block;
+        width: 100%;
+        height: 160px;
+        margin-top: 8px;
+    }
+}

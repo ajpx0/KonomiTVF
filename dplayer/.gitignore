@@ -1,0 +1,13 @@
+.idea
+node_modules
+demo2
+docs2
+npm-debug.log
+DPlayer.log*
+wxw
+.vscode
+docs/.vuepress/dist
+dist/src/*
+pre*
+.node-version
+/dist/

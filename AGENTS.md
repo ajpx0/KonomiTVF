@@ -14,7 +14,9 @@
     - Discord Social SDK は本家の thirdparty に含まれない。Discord Developer Portal から入手した SDK の zip から、共有ライブラリ (`discord_partner_sdk.dll` / `libdiscord_partner_sdk.so`) だけを `server/thirdparty/DiscordSocialSDK/` に直接置き、ctypes で C API を呼び出す
   - iPhone Safari など Fullscreen API がないブラウザ向けの疑似フルスクリーン (`PlayerStore.is_pseudo_fullscreen`)。縦向きでは `Watch.vue` の CSS で視聴画面全体を 90° 回転させて横画面表示にし、右側のパネルも開ける。回転中は Swiper のスワイプ判定が逆転するため、パネルのチャンネルタブではスワイプによるタブ切り替えを無効化している
 - サーバーとクライアントの両方を各ユーザーの PC で動かす前提で、Windows サービス・Linux の pm2 サービス・Docker で動作する
-- 動画プレイヤーには DPlayer のフォーク `github:AariyJP/DPlayerF#main` (tsukumijima/DPlayer v1.33.2 ベース) を使う。音量バーの常時表示・拡幅・1% 単位のホイール / 矢印キー操作と、big / small サイズのコメントで基準フォントサイズが変わってしまう問題の修正を含む
+- 動画プレイヤーには DPlayer のフォーク DPlayerF (tsukumijima/DPlayer v1.33.2 ベース) を使う。音量バーの常時表示・拡幅・1% 単位のホイール / 矢印キー操作と、big / small サイズのコメントで基準フォントサイズが変わってしまう問題の修正を含む
+  - ソースはトップレベルの `dplayer/` に同梱し、`client/package.json` から `file:../dplayer` で参照する
+  - ビルド成果物の `dplayer/dist/` は Git 管理外。CI と各環境では `dplayer/` で `npm ci` と `npm run build` を実行し、`dplayer/node_modules/` を削除してから `client/` の依存関係をインストールする (file: 参照は node_modules ごとコピーされ、DPlayer の型定義が `dplayer/` 側の古い mpeg2toh264 を参照してしまうため)
 
 ### リポジトリとリリース
 
@@ -36,7 +38,7 @@
 
 ## プロジェクト固有の注意事項
 
-- yarn や uv はそれぞれ `client/` と `server/` のディレクトリに移動した状態で実行してください。ルートディレクトリにはパッケージ管理系のファイルは一切配置していません。
+- yarn や uv はそれぞれ `client/` と `server/` のディレクトリに移動した状態で実行してください (`dplayer/` は npm を使い、`dplayer/` に移動した状態で実行します)。ルートディレクトリにはパッケージ管理系のファイルは一切配置していません。
 - `client/package.json` の mpeg2toh264 Git pin を更新するときは、`client/` で `yarn cache clean mpeg2toh264` を実行してから依存関係を再インストールしてください。yarn v1 は Git のコミットが変わっても同じパッケージ名とバージョンのキャッシュを再利用するため、古い JavaScript や型定義が残ります。
 - サーバー側では uv を使っているので、python コマンドは必ず全て uv run 経由で実行します。python を直接実行すると .venv/ 以下のライブラリがインストールされていないために失敗します。
 
