@@ -2,6 +2,7 @@
 
 import asyncio
 import shutil
+import sys
 import tracemalloc
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -162,9 +163,11 @@ async def test_batch_scan__skips_trash_and_unreadable_folders(client: httpx.Asyn
     shutil.copyfile(FIXTURES_DIR / 'captures' / file_name, root / file_name)
     (root / '#recycle').mkdir()
     shutil.copyfile(FIXTURES_DIR / 'captures' / trashed_name, root / '#recycle' / trashed_name)
-    (root / 'lost+found').mkdir()
-    shutil.copyfile(FIXTURES_DIR / 'captures' / trashed_name, root / 'lost+found' / trashed_name)
-    (root / 'lost+found').chmod(0o000)
+    ## Windows の chmod() は読み取り専用の属性しか変更できず、読めないフォルダを作れないので、権限のないフォルダは Linux でだけ置く
+    if sys.platform != 'win32':
+        (root / 'lost+found').mkdir()
+        shutil.copyfile(FIXTURES_DIR / 'captures' / trashed_name, root / 'lost+found' / trashed_name)
+        (root / 'lost+found').chmod(0o000)
     try:
         scanner = CaptureScanTask()
         await WaitUntil(lambda: scanner.scan_lock.locked() is False)
@@ -184,7 +187,8 @@ async def test_batch_scan__skips_trash_and_unreadable_folders(client: httpx.Asyn
 
     # ほかのテストの一覧に混ざらないよう、登録したキャプチャを削除し、権限を戻して一時フォルダを消せるようにする
     finally:
-        (root / 'lost+found').chmod(0o755)
+        if sys.platform != 'win32':
+            (root / 'lost+found').chmod(0o755)
     response = await client.request('DELETE', '/api/captures', json={'capture_ids': [registered_file.capture_id]}, headers=admin_headers)
     assert response.status_code == 200, response.text
 
@@ -195,7 +199,7 @@ async def test_batch_scan__skips_trash_and_unreadable_folders(client: httpx.Asyn
 # -------------------------------------------------------------------------------------
 
 
-async def test_batch_scan__lists_flat_folder_with_small_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_batch_scan__lists_flat_folder_with_small_memory(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     1つのフォルダに大量の画像が並ぶ保存先も、画像1枚あたり 250 バイト未満のメモリで一覧を保持し、
     名前の新しい塊から順に、塊の中は名前の昇順に処理する
