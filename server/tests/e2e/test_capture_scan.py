@@ -2,12 +2,15 @@
 
 import asyncio
 import shutil
+import tracemalloc
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx2 as httpx
 import pytest
 
+from app.constants import JST
 from app.metadata.CaptureScanTask import CaptureScanTask, NormalizeCapturePath
 from app.models.Capture import CaptureFile
 from tests.conftest import FIXTURES_DIR, TEMP_DIR
@@ -184,6 +187,65 @@ async def test_batch_scan__skips_trash_and_unreadable_folders(client: httpx.Asyn
         (root / 'lost+found').chmod(0o755)
     response = await client.request('DELETE', '/api/captures', json={'capture_ids': [registered_file.capture_id]}, headers=admin_headers)
     assert response.status_code == 200, response.text
+
+
+# -------------------------------------------------------------------------------------
+# アップロードの保存先のように、1つのフォルダに大量の画像が並ぶ保存先を一括スキャンするフロー
+# (画像が1つのフォルダに並ぶ保存先 → CaptureScanTask.runBatchScan()) - 正常系
+# -------------------------------------------------------------------------------------
+
+
+async def test_batch_scan__lists_flat_folder_with_small_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    1つのフォルダに大量の画像が並ぶ保存先も、画像1枚あたり 250 バイト未満のメモリで一覧を保持し、
+    名前の新しい塊から順に、塊の中は名前の昇順に処理する
+    """
+
+    # KonomiTV からアップロードしたときと同じ形の名前で、5万枚の画像を1つのフォルダに置く
+    ## 一覧の保持に使うメモリと処理の順だけを確かめるため、画像の中身は空にする
+    root = TEMP_DIR / 'flat-folder'
+    root.mkdir()
+    file_count = 50000
+    captured_at = datetime(2022, 1, 1, tzinfo=JST)
+    for _ in range(file_count):
+        (root / captured_at.strftime('Capture_%Y%m%d-%H%M%S.jpg')).touch()
+        captured_at += timedelta(seconds=157)
+
+    # 処理する順は、名前の昇順に並べた画像を末尾の塊から順に、塊の中は名前の昇順にする
+    sorted_paths = sorted(NormalizeCapturePath(path) for path in root.iterdir())
+    expected_paths: list[str] = []
+    for chunk_end in range(file_count, 0, -CaptureScanTask.SCAN_CHUNK_SIZE):
+        expected_paths.extend(sorted_paths[max(0, chunk_end - CaptureScanTask.SCAN_CHUNK_SIZE):chunk_end])
+
+    # 登録と移動の照合は、処理したパスが期待した順かを照合するだけにする
+    ## 処理したパスを保持すると、一覧の保持とは別にメモリを確保してしまうため、件数と順の食い違いだけを記録する
+    scanner = CaptureScanTask()
+    processed_count = 0
+    out_of_order_paths: list[str] = []
+    async def MoveFile(*args: object) -> bool:
+        return False
+    async def ProcessFile(path: str) -> bool:
+        nonlocal processed_count
+        if path != expected_paths[processed_count] and len(out_of_order_paths) < 5:
+            out_of_order_paths.append(path)
+        processed_count += 1
+        return True
+    monkeypatch.setattr(scanner, 'moveFile', MoveFile)
+    monkeypatch.setattr(scanner, 'processFile', ProcessFile)
+    await WaitUntil(lambda: scanner.scan_lock.locked() is False)
+
+    # 一括スキャンの間に確保したメモリの最大値が、画像1枚あたり 250 バイト未満に収まる
+    tracemalloc.start()
+    try:
+        assert await scanner.runBatchScan([str(root)]) is True
+        _, peak_memory = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak_memory < file_count * 250, f'Peak memory: {peak_memory} bytes'
+
+    # すべての画像を期待した順に処理する
+    assert processed_count == file_count
+    assert out_of_order_paths == []
 
 
 # -------------------------------------------------------------------------------------

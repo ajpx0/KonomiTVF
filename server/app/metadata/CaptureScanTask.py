@@ -150,6 +150,25 @@ class CaptureFileSnapshot(TypedDict):
 
 
 @dataclass(slots=True)
+class CaptureFolderListing:
+    """
+    一括スキャンでフォルダを1つ列挙した結果
+    KonomiTV からのアップロードは保存先の直下に置くため、1つのフォルダに十数万〜百万枚の画像が並ぶ
+    画像ごとにパスと日時のオブジェクトを作ると百万枚で約 300MB になるため、画像はファイル名と、サイズ・作成日時・更新日時の数値の配列で保持する
+    画像は名前の昇順に並べてあり、同じ位置の要素が同じ画像を表す
+    """
+
+    # 子フォルダのパスと更新日時
+    directories: list[tuple[str, float]]
+    # 画像のファイル名 (パスは、走査しているフォルダのパスと連結して作る)
+    file_names: list[str]
+    file_sizes: array[int]
+    # 画像の stat の st_ctime・st_mtime の値 (塊ごとに datetime に変換する)
+    file_created_timestamps: array[float]
+    file_modified_timestamps: array[float]
+
+
+@dataclass(slots=True)
 class CaptureRootScanResult:
     """
     保存先ごとの走査の結果 (全保存先の移動の照合が終わってから、消えたファイルを確定するために使う)
@@ -962,7 +981,7 @@ class CaptureScanTask:
         while len(pending_folders) > 0:
             folder = pending_folders.pop()
             try:
-                directories, files = await asyncio.to_thread(self.listFolder, folder)
+                listing = await asyncio.to_thread(self.listFolder, folder)
             # 保存先の中の、権限がなくて読めないフォルダ (ドライブのルートの System Volume Information や lost+found など) は、走査の対象から外す
             ## 中に登録済みの場所があっても、そのファイルの stat も権限で失敗するので、消えたファイルとしては確定されない
             except PermissionError as ex:
@@ -976,16 +995,24 @@ class CaptureScanTask:
                 is_complete = False
                 logging.warning(f'Cannot list capture folder: {folder}', exc_info=ex)
                 continue
-            found_count += len(files)
+            found_count += len(listing.file_names)
 
             # 子フォルダは更新日時の古い順に積み、新しいフォルダから先に取り出す
-            for directory, _ in sorted(directories, key=lambda item: item[1]):
+            for directory, _ in sorted(listing.directories, key=lambda item: item[1]):
                 pending_folders.append(anyio.Path(directory))
 
-            # 新しい塊から順に処理し、塊の中は HDD の読み取りが速い名前の昇順に読む
-            files.sort(key=lambda item: item[0])
-            for chunk_end in range(len(files), 0, -self.SCAN_CHUNK_SIZE):
-                chunk = files[max(0, chunk_end - self.SCAN_CHUNK_SIZE):chunk_end]
+            # 名前の昇順に並んだ画像を、新しい塊から順に処理し、塊の中は HDD の読み取りが速い名前の昇順に読む
+            for chunk_end in range(len(listing.file_names), 0, -self.SCAN_CHUNK_SIZE):
+
+                # 塊の画像だけ、パスと日時のオブジェクトを作る
+                chunk: list[tuple[str, int, datetime, datetime]] = []
+                for index in range(max(0, chunk_end - self.SCAN_CHUNK_SIZE), chunk_end):
+                    chunk.append((
+                        NormalizeCapturePath(os.path.join(folder, listing.file_names[index])),
+                        listing.file_sizes[index],
+                        datetime.fromtimestamp(listing.file_created_timestamps[index], JST),
+                        datetime.fromtimestamp(listing.file_modified_timestamps[index], JST),
+                    ))
 
                 # この塊のパスで登録済みの場所を、まとめて DB から取得する (file_path の UNIQUE 制約のインデックスで引ける)
                 chunk_paths: list[str] = []
@@ -1191,19 +1218,23 @@ class CaptureScanTask:
 
 
     @classmethod
-    def listFolder(cls, folder: anyio.Path) -> tuple[list[tuple[str, float]], list[tuple[str, int, datetime, datetime]]]:
+    def listFolder(cls, folder: anyio.Path) -> CaptureFolderListing:
         """
-        フォルダを1つだけ列挙する (読めなかった場合は OSError を送出する)
+        フォルダを1つだけ列挙し、画像を名前の昇順に並べる (読めなかった場合は OSError を送出する)
+        百万枚のフォルダでは並べ替えに数百ミリ秒かかるため、ワーカースレッドで実行する
 
         Args:
             folder (anyio.Path): 対象のフォルダ
 
         Returns:
-            tuple[list[tuple[str, float]], list[tuple[str, int, datetime, datetime]]]: 子フォルダとその更新日時、画像ファイルとそのサイズ・作成日時・更新日時
+            CaptureFolderListing: 子フォルダとその更新日時、名前の昇順に並べた画像のファイル名とサイズ・作成日時・更新日時
         """
 
         directories: list[tuple[str, float]] = []
-        files: list[tuple[str, int, datetime, datetime]] = []
+        file_names: list[str] = []
+        file_sizes = array('q')
+        file_created_timestamps = array('d')
+        file_modified_timestamps = array('d')
         with os.scandir(str(folder)) as iterator:
             for entry in iterator:
 
@@ -1220,16 +1251,32 @@ class CaptureScanTask:
                     directories.append((NormalizeCapturePath(entry.path), directory_stat.st_mtime))
                     continue
 
-                if entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in cls.CAPTURE_EXTENSIONS:
-                    file_stat = entry.stat(follow_symlinks=False)
-                    files.append((
-                        NormalizeCapturePath(entry.path),
-                        file_stat.st_size,
-                        datetime.fromtimestamp(file_stat.st_ctime, JST),
-                        datetime.fromtimestamp(file_stat.st_mtime, JST),
-                    ))
+                # 拡張子は Path(entry.name).suffix と同じ規則 (先頭の . は拡張子に数えない) で、Path を作らずに取り出す
+                ## Path() は名前を sys.intern() に通すため、その名前を一覧に保持すると、百万枚のフォルダではインターンした文字列の辞書が百万件分に広がり、
+                ## 走査を終えたあともその大きさのまま残る
+                dot_index = entry.name.rfind('.')
+                suffix = ''
+                if 0 < dot_index < len(entry.name) - 1:
+                    suffix = entry.name[dot_index:].lower()
 
-        return directories, files
+                # 画像の stat の値は一覧を取るときに記録し、塊を処理するときにそのまま使う (Windows では一覧の取得と同時に得られ、ネットワーク越しでも追加の通信なしで済む)
+                if entry.is_file(follow_symlinks=False) and suffix in cls.CAPTURE_EXTENSIONS:
+                    file_stat = entry.stat(follow_symlinks=False)
+                    file_names.append(entry.name)
+                    file_sizes.append(file_stat.st_size)
+                    file_created_timestamps.append(file_stat.st_ctime)
+                    file_modified_timestamps.append(file_stat.st_mtime)
+
+        # 画像を名前の昇順に並べ替える
+        ## 画像ごとのタプルを作らずに済むよう、名前の昇順に並べたときの位置の一覧を求めてから、それぞれの配列をその順に作り直す
+        order = sorted(range(len(file_names)), key=file_names.__getitem__)
+        return CaptureFolderListing(
+            directories = directories,
+            file_names = [file_names[index] for index in order],
+            file_sizes = array('q', (file_sizes[index] for index in order)),
+            file_created_timestamps = array('d', (file_created_timestamps[index] for index in order)),
+            file_modified_timestamps = array('d', (file_modified_timestamps[index] for index in order)),
+        )
 
 
     async def watchFolders(self) -> None:
