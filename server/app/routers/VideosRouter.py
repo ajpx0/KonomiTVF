@@ -556,13 +556,15 @@ async def VideosSearchAPI(
         params: list[str] = []
         for keyword in keywords:
             # LIKE 検索用のパラメータを生成（前後に % を付与）
-            param = f'%{keyword.lower()}%'
+            ## 検索語に含まれる % と _ は、ワイルドカードではなくその文字自体として探すよう \ でエスケープする
+            escaped_keyword = keyword.lower().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            param = f'%{escaped_keyword}%'
             conditions.append('''
                 (
-                    LOWER(ch.name) LIKE ? OR
-                    LOWER(rp.title) LIKE ? OR
-                    LOWER(rp.series_title) LIKE ? OR
-                    LOWER(rp.subtitle) LIKE ?
+                    LOWER(ch.name) LIKE ? ESCAPE '\\' OR
+                    LOWER(rp.title) LIKE ? ESCAPE '\\' OR
+                    LOWER(rp.series_title) LIKE ? ESCAPE '\\' OR
+                    LOWER(rp.subtitle) LIKE ? ESCAPE '\\'
                 )
             '''.strip())
             params.extend([param] * 4)  # 4つの検索対象カラムに同じパラメータを使用
