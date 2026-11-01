@@ -38,10 +38,11 @@ async def ValidateVideoID(video_id: Annotated[int, Path(description='録画番�
     recorded_program = await RecordedProgram.filter(id=video_id).get_or_none() \
         .select_related('recorded_video') \
         .select_related('channel')
-    if recorded_program is None:
+    # 録画ファイルが見つからなくなった (Missing の) 録画番組は再生できないので、存在しない録画番組と同じく扱う
+    if recorded_program is None or recorded_program.recorded_video.status == 'Missing':
         logging.error(f'[VideoStreamsRouter][ValidateVideoID] Specified video_id was not found. [video_id: {video_id}]')
         raise HTTPException(
-            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail = 'Specified video_id was not found',
         )
 
@@ -57,7 +58,7 @@ async def ValidateQuality(quality: Annotated[str, Path(description='映像の品
     if stream_quality is None:
         logging.error(f'[VideoStreamsRouter][ValidateQuality] Specified quality was not found. [quality: {quality}]')
         raise HTTPException(
-            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail = 'Specified quality was not found',
         )
 
@@ -65,7 +66,7 @@ async def ValidateQuality(quality: Annotated[str, Path(description='映像の品
     if stream_quality.quality == 'original':
         logging.error(f'[VideoStreamsRouter][ValidateQuality] Original quality is not available for HLS playlist. [quality: {quality}]')
         raise HTTPException(
-            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail = 'Original quality is not available for HLS playlist',
         )
 
@@ -171,7 +172,7 @@ async def VideoHLSSegmentAPI(
     except ValueError as ex:
         logging.error(f'{video_stream.log_prefix} Failed to get segment. [sequence: {sequence}, audio: {audio}]', exc_info=ex)
         raise HTTPException(
-            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail = f'Failed to get segment. [audio: {audio}]',
         ) from ex
     # エンコードや入力位置の解決に失敗した場合は、再生クライアントへ原因を区別できるレスポンスを返す
@@ -187,7 +188,7 @@ async def VideoHLSSegmentAPI(
             f'[sequence: {sequence}]'
         )
         raise HTTPException(
-            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail = 'Specified sequence segment was not found',
         )
 

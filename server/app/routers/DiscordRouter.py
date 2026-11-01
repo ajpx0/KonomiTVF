@@ -5,7 +5,7 @@ import time
 from typing import Annotated, TypedDict
 from urllib.parse import urlencode
 
-import httpx
+import httpx2 as httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app import logging, schemas

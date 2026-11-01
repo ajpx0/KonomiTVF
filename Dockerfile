@@ -21,7 +21,7 @@ WORKDIR /
 # RUN aria2c -x10 https://github.com/tsukumijima/KonomiTV/releases/download/v0.14.1/thirdparty-linux.tar.xz
 # RUN tar xvf thirdparty-linux.tar.xz
 ## 開発版 (0.xx.x-dev) 用
-RUN aria2c -x10 https://nightly.link/tsukumijima/KonomiTV/actions/runs/38878639663/thirdparty-linux.tar.xz.zip
+RUN aria2c -x10 https://nightly.link/tsukumijima/KonomiTV/actions/runs/39993380983/thirdparty-linux.tar.xz.zip
 RUN unzip thirdparty-linux.tar.xz.zip && tar xvf thirdparty-linux.tar.xz
 
 # --------------------------------------------------------------------------------------------------------------
@@ -29,10 +29,13 @@ RUN unzip thirdparty-linux.tar.xz.zip && tar xvf thirdparty-linux.tar.xz
 # クライアントのビルド成果物 (dist) は Git に含まれているが、万が一ビルドし忘れたりや開発ブランチでの利便性を考慮してビルドしておく
 # --------------------------------------------------------------------------------------------------------------
 
-FROM node:20.16.0 AS client-builder
+# Node.js 22.x の公式イメージでビルドする
+FROM node:22-bookworm-slim AS client-builder
 
 # クライアントが file:../dplayer で参照する DPlayer を先にビルド
 ## dplayer/dist/ は Git 管理外のため、クライアントの依存パッケージをインストールする前に生成しておく
+## dplayer/ は GitHub 上の依存パッケージ (mpeg2toh264 など) を持ち、npm が git で取得するため、slim イメージに含まれない git を入れておく
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git && rm -rf /var/lib/apt/lists/*
 WORKDIR /code/dplayer/
 COPY ./dplayer/package.json ./dplayer/package-lock.json /code/dplayer/
 COPY ./dplayer/patches/ /code/dplayer/patches/

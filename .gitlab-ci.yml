@@ -311,7 +311,7 @@ thirdparty-linux-arm64:
 
 create-release-commit:
   stage: prepare
-  image: node:20.16.0-bookworm
+  image: node:22.21.1-bookworm
   resource_group: create-release-commit
   variables:
     GIT_DEPTH: "0"
