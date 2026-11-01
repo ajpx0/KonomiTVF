@@ -1436,7 +1436,12 @@ class CaptureScanTask:
                         await asyncio.sleep(5)
 
             # 保存先ごとに監視する (まとめて監視すると、1つの保存先が見えないだけで、すべての保存先の監視が止まるため)
-            await asyncio.gather(*(WatchRoot(root) for root in local_roots))
+            ## 監視を止めるときは、監視から始めた一括スキャンも一緒に止め、DB を閉じたあとまで走査が続かないようにする
+            try:
+                await asyncio.gather(*(WatchRoot(root) for root in local_roots))
+            finally:
+                for scan_task in scan_tasks:
+                    scan_task.cancel()
 
         async def Poll() -> None:
             """
