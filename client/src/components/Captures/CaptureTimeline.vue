@@ -15,18 +15,31 @@
                     <span class="capture-timeline__header-count">{{ section.count.toLocaleString() }}枚</span>
                 </span>
             </div>
-            <template v-for="tile in visibleTiles(section)" :key="tile.key">
-                <div class="capture-timeline__tile" :style="tile.style">
-                    <CaptureTile v-if="tile.capture" :capture="tile.capture"
-                        :selected="selection.isSelected(tile.capture)"
-                        :cursor="selection.isCursor(tile.capture)"
-                        :previewed="selection.isPreviewed(tile.capture)"
-                        :selecting="selection.isSelecting.value"
-                        @open="$emit('open', tile.capture)"
-                        @toggle="(shiftKey) => onToggle(tile.capture!, shiftKey)"
-                        @updated="$emit('updated', $event)" />
-                    <div v-else class="capture-timeline__placeholder"></div>
+            <!-- 読み込めなかった日は、読み込み中の灰色の枠の代わりに、読み込めなかったことと再読み込みのボタンをタイルの領域に表示する -->
+            <div v-if="failedDays.has(section.date)" class="capture-timeline__failed"
+                :style="{ top: `${section.top + HEADER_HEIGHT - baseOffset}px`, height: `${section.height - HEADER_HEIGHT - SECTION_GAP}px` }">
+                <div class="capture-timeline__failed-content">
+                    <div class="capture-timeline__failed-message">この日のキャプチャを読み込めませんでした。</div>
+                    <v-btn class="mt-3 px-4" color="secondary" variant="flat" height="40" @click="retryDay(section.date)">
+                        <Icon icon="fluent:arrow-clockwise-16-filled" width="18px" height="18px" />
+                        <span class="ml-1">再読み込み</span>
+                    </v-btn>
                 </div>
+            </div>
+            <template v-else>
+                <template v-for="tile in visibleTiles(section)" :key="tile.key">
+                    <div class="capture-timeline__tile" :style="tile.style">
+                        <CaptureTile v-if="tile.capture" :capture="tile.capture"
+                            :selected="selection.isSelected(tile.capture)"
+                            :cursor="selection.isCursor(tile.capture)"
+                            :previewed="selection.isPreviewed(tile.capture)"
+                            :selecting="selection.isSelecting.value"
+                            @open="$emit('open', tile.capture)"
+                            @toggle="(shiftKey) => onToggle(tile.capture!, shiftKey)"
+                            @updated="$emit('updated', $event)" />
+                        <div v-else class="capture-timeline__placeholder"></div>
+                    </div>
+                </template>
             </template>
         </template>
     </div>
@@ -95,8 +108,9 @@ const baseOffset = ref(0);  // 要素の上端に当たる、タイムライン�
 // 日付ごとの件数と、読み込んだ日のキャプチャ
 const sections = shallowRef<ITimelineSection[]>([]);
 const loadedDays = shallowRef(new Map<string, ICapture[]>());
-// 日の読み込みの結果 (Queued は、同時に読み込める数の上限で順番待ちになったことを表す)
-type DayLoadResult = 'Loaded' | 'Queued' | 'Failed';
+// 日の読み込みの結果 (Queued は、同時に読み込める数の上限で順番待ちになったことを、
+// Canceled は、読み込みの途中でその日が見えなくなり、見えている日に順番を譲って打ち切ったことを表す)
+type DayLoadResult = 'Loaded' | 'Queued' | 'Canceled' | 'Failed';
 // 読み込み中の日と、その読み込みの完了 (同じ日を待つ呼び出しで完了を共有する)
 // 絞り込みを変えたあとの読み込みを、変える前の読み込みと分けるため、世代と日付の組で持つ
 const loadingDays = new Map<string, Promise<DayLoadResult>>();
@@ -247,9 +261,10 @@ const visibleSections = computed(() => {
 
 // 見えている日のうち、読み込んでいない日を読み込む
 // 読み込めなかった日は、スクロールのたびに取り直してエラーを出し続けないよう、少し間を空けてから読み直す
+// (すぐに読み直したいときは、その日の位置に表示する再読み込みのボタンから読み直せる)
 watch(visibleSections, (list) => {
     for (const section of list) {
-        const failedAt = failedDays.get(`${generation}:${section.date}`);
+        const failedAt = failedDays.value.get(section.date);
         if (failedAt !== undefined && performance.now() - failedAt < 10 * 1000) {
             continue;
         }
@@ -293,9 +308,12 @@ const visibleTiles = (section: ITimelineSection) => {
 
 // 1日分のキャプチャを読み込む (同時に読み込むのは2日まで)
 let activeLoads = 0;
-// 読み込めなかった日と、その時刻 (キーは `世代:日付`)
-const failedDays = new Map<string, number>();
+// 今の絞り込みで読み込めなかった日と、その時刻 (画面に読み込めなかったことを表示するため、変更を画面に反映する)
+const failedDays = shallowRef(new Map<string, number>());
 const pendingDays: string[] = [];
+// 拡大表示の前後の移動やキーボードでの移動で、読み終わるのを待っている日
+// 見えていなくても、読み込みを打ち切らずに最後のページまで読み込む
+const requiredDays = new Set<string>();
 const loadDay = (date: string): Promise<DayLoadResult> => {
     if (loadedDays.value.has(date)) {
         return Promise.resolve('Loaded');
@@ -315,24 +333,49 @@ const loadDay = (date: string): Promise<DayLoadResult> => {
     const promise = (async (): Promise<DayLoadResult> => {
         activeLoads++;
         try {
-            const result = await Captures.fetchAllCaptures({
-                order: props.axis === 'CapturedAt' ? 'CapturedAtDesc' : 'BroadcastAtDesc',
-                date,
-                day_start_hour: props.dayStartHour,
-                filter: props.filter,
-            });
-            if (myGeneration !== generation || result === null) {
-                if (result === null) {
-                    failedDays.set(loadingKey, performance.now());
+            // 1日分のキャプチャを、カーソルをたどって最後のページまで読み込む
+            // 1日に数千枚ある日は何ページにも分かれるので、ページごとにその日がまだ必要かを確認し、
+            // スクラバーで遠くへ移ったあとは、見えなくなった日の続きのページを読まずに、移った先の日に順番を譲る
+            const captures: ICapture[] = [];
+            const dayPrograms: ICaptureProgram[] = [];
+            let cursor: string | null = null;
+            do {
+                const isVisible = visibleSections.value.some(section => section.date === date);
+                if (isVisible === false && requiredDays.has(date) === false) {
+                    return 'Canceled';
                 }
-                return 'Failed';
+                const page = await Captures.fetchCaptures({
+                    order: props.axis === 'CapturedAt' ? 'CapturedAtDesc' : 'BroadcastAtDesc',
+                    cursor,
+                    limit: 200,
+                    date,
+                    day_start_hour: props.dayStartHour,
+                    filter: props.filter,
+                });
+                if (myGeneration !== generation) {
+                    return 'Failed';
+                }
+                // 読み込めなかった日は、画面に読み込めなかったことと再読み込みのボタンを表示する
+                if (page === null) {
+                    failedDays.value = new Map(failedDays.value).set(date, performance.now());
+                    return 'Failed';
+                }
+                captures.push(...page.captures);
+                dayPrograms.push(...page.programs);
+                cursor = page.next_cursor;
+            } while (cursor !== null);
+
+            // 読み込めた日は、読み込めなかった記録を消し、キャプチャと番組の情報を画面に反映する
+            if (failedDays.value.has(date)) {
+                const nextFailedDays = new Map(failedDays.value);
+                nextFailedDays.delete(date);
+                failedDays.value = nextFailedDays;
             }
-            failedDays.delete(loadingKey);
-            for (const program of result.programs) {
+            for (const program of dayPrograms) {
                 programs.set(program.id, program);
             }
             const next = new Map(loadedDays.value);
-            next.set(date, result.captures);
+            next.set(date, captures);
             loadedDays.value = next;
             return 'Loaded';
         } finally {
@@ -353,6 +396,17 @@ const loadDay = (date: string): Promise<DayLoadResult> => {
     return promise;
 };
 
+/**
+ * 読み込めなかった日を、すぐに読み込み直す (その日の位置に表示する再読み込みのボタン)
+ * @param date 日付 (YYYY-MM-DD)
+ */
+const retryDay = (date: string) => {
+    const next = new Map(failedDays.value);
+    next.delete(date);
+    failedDays.value = next;
+    void loadDay(date);
+};
+
 // 取り直している日付ごとの件数 (拡大表示の前後の移動で、取り直し終わるのを待つため)
 let reloadingSections: Promise<unknown> | null = null;
 
@@ -361,6 +415,7 @@ const reload = async () => {
     generation++;
     const myGeneration = generation;
     loadedDays.value = new Map();
+    failedDays.value = new Map();
     pendingDays.length = 0;
     const request = Captures.fetchSections({ axis: props.axis, day_start_hour: props.dayStartHour, filter: props.filter });
     reloadingSections = request;
@@ -593,11 +648,21 @@ const formatDate = (date: string) => {
  * @returns その日のキャプチャ (読み込めなかったときは undefined)
  */
 const waitForDay = async (date: string) => {
+    // 待っている間は、見えていない日でも読み込みを打ち切らずに最後まで読み込む
     // 順番待ちになった日は、画面に見えていないと読み込まずに外されるので、空きができ次第この日の読み込みを始めるよう呼び直す
-    let result = await loadDay(date);
-    while (result === 'Queued') {
-        await new Promise(resolve => setTimeout(resolve, 100));
+    // 待ち始める前に見えなくなって打ち切られた読み込みも、同じように読み込み直す
+    requiredDays.add(date);
+    let result: DayLoadResult;
+    try {
         result = await loadDay(date);
+        while (result === 'Queued' || result === 'Canceled') {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            // 同じ日を待っていたほかの呼び出しが先に待ち終えて外していても、この呼び出しが待っている間は読み込み続ける
+            requiredDays.add(date);
+            result = await loadDay(date);
+        }
+    } finally {
+        requiredDays.delete(date);
     }
     // 読み込めなかった日は、端に着いたのではなく分からないだけなので、次に送るときに読み直せるよう undefined を返す
     if (result === 'Failed') {
@@ -894,6 +959,31 @@ defineExpose({ reload, getNeighbor, getKeyboardTarget, revealCapture, getDayCapt
         height: 100%;
         border-radius: 6px;
         background: rgb(var(--v-theme-background-lighten-1));
+    }
+
+    // 読み込めなかった日のタイルの領域 (1日に数百枚ある日でも、案内とボタンが固定のヘッダーの下に見え続けるよう、中身を上端に貼り付ける)
+    &__failed {
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        position: absolute;
+        left: 0;
+        right: 0;
+        border-radius: 6px;
+        background: rgb(var(--v-theme-background-lighten-1));
+        &-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: sticky;
+            top: 72px;
+            padding: 8px 12px;
+            text-align: center;
+        }
+        &-message {
+            font-size: 14px;
+            color: rgb(var(--v-theme-text-darken-1));
+        }
     }
 }
 
