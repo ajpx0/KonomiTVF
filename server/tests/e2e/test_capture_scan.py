@@ -245,7 +245,9 @@ async def test_delete_capture__with_paths_differing_only_in_case(
     """
 
     # Windows と同じく、パスを小文字にしたものを同じファイルかどうかの判定に使う
-    monkeypatch.setattr('app.metadata.CaptureScanTask.CapturePathKey', lambda path: path.lower())
+    def LowerCasePathKey(path: str) -> str:
+        return path.lower()
+    monkeypatch.setattr('app.metadata.CaptureScanTask.CapturePathKey', LowerCasePathKey)
 
     # アップロードしたキャプチャに、名前の大文字と小文字だけを変えたパスの場所をもう1つ登録する
     file_name = 'Capture_20260826-044039.jpg'
