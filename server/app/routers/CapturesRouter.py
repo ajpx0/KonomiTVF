@@ -325,25 +325,27 @@ async def BuildCaptureWhere(
     query_targets = set(filters.query_targets or [])
     is_all_targets = len(query_targets) == 0 or query_targets == {'CaptionText', 'ProgramTitle', 'ProgramDescription'}
     for keyword in (filters.query or '').split():
-        pattern = f'%{keyword.lower()}%'
+        # 検索語に含まれる % と _ は、ワイルドカードではなくその文字自体として探すよう \ でエスケープする
+        escaped_keyword = keyword.lower().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        pattern = f'%{escaped_keyword}%'
 
         # すべての範囲から探す
         if is_all_targets is True:
             conditions.append("""
                 (
-                    c.caption_text LIKE ? OR
+                    c.caption_text LIKE ? ESCAPE '\\' OR
                     c.capture_program_id IN (
                         SELECT p2.id FROM capture_programs p2
-                        WHERE p2.title LIKE ? OR p2.description LIKE ? OR EXISTS (
+                        WHERE p2.title LIKE ? ESCAPE '\\' OR p2.description LIKE ? ESCAPE '\\' OR EXISTS (
                             SELECT 1 FROM channels ch
-                            WHERE ch.network_id = p2.network_id AND ch.service_id = p2.service_id AND ch.name LIKE ?
+                            WHERE ch.network_id = p2.network_id AND ch.service_id = p2.service_id AND ch.name LIKE ? ESCAPE '\\'
                         )
                     ) OR
                     c.id IN (
                         SELECT f.capture_id FROM capture_files f
                         WHERE f.id IN (
                             SELECT f2.id FROM capture_files f2
-                            WHERE f2.file_name LIKE ?
+                            WHERE f2.file_name LIKE ? ESCAPE '\\'
                         )
                     )
                 )
@@ -354,14 +356,14 @@ async def BuildCaptureWhere(
         # 指定された範囲の列だけから探す (列の並びは、すべての範囲から探すときと同じ順にする)
         target_conditions: list[str] = []
         if 'CaptionText' in query_targets:
-            target_conditions.append('c.caption_text LIKE ?')
+            target_conditions.append("c.caption_text LIKE ? ESCAPE '\\'")
             params.append(pattern)
         program_conditions: list[str] = []
         if 'ProgramTitle' in query_targets:
-            program_conditions.append('p2.title LIKE ?')
+            program_conditions.append("p2.title LIKE ? ESCAPE '\\'")
             params.append(pattern)
         if 'ProgramDescription' in query_targets:
-            program_conditions.append('p2.description LIKE ?')
+            program_conditions.append("p2.description LIKE ? ESCAPE '\\'")
             params.append(pattern)
         if len(program_conditions) > 0:
             target_conditions.append(f'c.capture_program_id IN (SELECT p2.id FROM capture_programs p2 WHERE {" OR ".join(program_conditions)})')
@@ -1138,14 +1140,16 @@ async def CaptureProgramsAPI(
     for keyword in (query or '').split():
         conditions.append("""
             (
-                LOWER(p.title) LIKE ? OR
+                LOWER(p.title) LIKE ? ESCAPE '\\' OR
                 EXISTS (
                     SELECT 1 FROM channels ch
-                    WHERE ch.network_id = p.network_id AND ch.service_id = p.service_id AND LOWER(ch.name) LIKE ?
+                    WHERE ch.network_id = p.network_id AND ch.service_id = p.service_id AND LOWER(ch.name) LIKE ? ESCAPE '\\'
                 )
             )
         """.strip())
-        params.extend([f'%{keyword.lower()}%'] * 2)  # 2つの検索対象に同じパラメータを使う
+        # 検索語に含まれる % と _ は、ワイルドカードではなくその文字自体として探すよう \ でエスケープする
+        escaped_keyword = keyword.lower().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        params.extend([f'%{escaped_keyword}%'] * 2)  # 2つの検索対象に同じパラメータを使う
 
     # 同じ番組キーの録画番組があるかどうかで絞り込む
     ## 録画ファイルが見つからなくなった (Missing の) 録画番組は開けないので、録画番組がないものとして扱う
